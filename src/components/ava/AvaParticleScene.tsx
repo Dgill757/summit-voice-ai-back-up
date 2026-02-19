@@ -37,12 +37,12 @@ const VERTEX_SHADER = `
     // Mouse-driven light simulation: brighten particles near virtual light
     vec3 lightPos = vec3(uMouse.x * 1.8, uMouse.y * 1.2 + 0.6, 2.2);
     float lightDist = distance(pos, lightPos);
-    vBrightness = 1.0 + (1.0 / (1.0 + lightDist * lightDist * 0.25)) * 1.2;
+    vBrightness = 1.0 + (1.0 / (1.0 + lightDist * lightDist * 0.5)) * 0.55;
 
     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
 
     float sizeScale = max(0.15, 1.0 - uScrollProgress * 0.25);
-    gl_PointSize = aSize * sizeScale * (290.0 / -mvPosition.z);
+    gl_PointSize = aSize * sizeScale * (90.0 / -mvPosition.z);
 
     gl_Position = projectionMatrix * mvPosition;
   }
@@ -60,10 +60,11 @@ const FRAGMENT_SHADER = `
 
     if (dist > 0.5) discard;
 
-    float alpha = (1.0 - smoothstep(0.18, 0.5, dist)) * vAlpha;
-    float glow  = 1.0 - dist * 1.55;
+    // Sharp pixel-like dot with tiny soft edge
+    float alpha = (1.0 - smoothstep(0.38, 0.5, dist)) * vAlpha;
+    float glow  = max(0.0, 1.0 - dist * 2.2);
 
-    vec3 color = vColor * vBrightness * (0.80 + glow * 0.55);
+    vec3 color = vColor * vBrightness * (0.75 + glow * 0.25);
     color = clamp(color, 0.0, 1.0);
 
     // Premultiplied alpha — required for NormalBlending to composite cleanly
@@ -117,16 +118,16 @@ function generateAvaGeometry(count: number) {
     const vy    = (y / d) * speed * 0.55 + (rng() - 0.5) * 1.0;
     const vz    = (rng() < 0.5 ? 1 : -1) * speed * 1.5 + (rng() - 0.5) * 0.8;
 
-    const bright     = 0.48 + rng() * 0.52;
+    const bright     = 0.42 + rng() * 0.58;
     const faceFactor = (z + 0.82) / 1.64;
-    const lum        = bright * (0.82 + faceFactor * 0.18);
+    const lum        = bright * (0.80 + faceFactor * 0.20);
 
-    // Pure purple palette: high R, low G, high B
+    // Deep purple: R ~0.38, G ~0.14, B ~0.92  (#7C3AED range)
     add(x, y, z, vx, vy, vz,
-      lum * (0.50 + rng() * 0.18),
-      lum * (0.16 + rng() * 0.08),
-      lum * (0.95 + rng() * 0.05),
-      0.45 + rng() * 1.9);
+      lum * (0.36 + rng() * 0.10),
+      lum * (0.13 + rng() * 0.06),
+      lum * (0.90 + rng() * 0.10),
+      0.25 + rng() * 0.75);
   }
 
   // ── HAIR / VEIL (6%)
@@ -140,8 +141,8 @@ function generateAvaGeometry(count: number) {
 
     add(x, y, z,
       (rng() - 0.5) * 2.4, 1.4 + rng() * 2.0, (rng() - 0.5) * 2.0,
-      0.38 + rng() * 0.14, 0.10 + rng() * 0.08, 0.70 + rng() * 0.22,
-      0.28 + rng() * 0.95);
+      0.30 + rng() * 0.10, 0.09 + rng() * 0.06, 0.68 + rng() * 0.20,
+      0.18 + rng() * 0.50);
   }
 
   // ── NECK (4%)
@@ -155,8 +156,8 @@ function generateAvaGeometry(count: number) {
 
     add(x, y, z,
       (rng() - 0.5) * 2.6, -(1.0 + rng() * 2.0), (rng() - 0.5) * 2.0,
-      0.40 + rng() * 0.14, 0.12 + rng() * 0.08, 0.75 + rng() * 0.22,
-      0.28 + rng() * 0.75);
+      0.34 + rng() * 0.10, 0.10 + rng() * 0.06, 0.72 + rng() * 0.20,
+      0.18 + rng() * 0.45);
   }
 
   // ── SHOULDERS / BUST (22%)
@@ -169,8 +170,8 @@ function generateAvaGeometry(count: number) {
 
     add(x, y, z,
       x * 0.38 + (rng() - 0.5) * 2.5, -(1.2 + rng() * 1.5), (rng() - 0.5) * 2.6,
-      0.32 + rng() * 0.14, 0.09 + rng() * 0.07, 0.60 + rng() * 0.22,
-      0.28 + rng() * 1.05);
+      0.26 + rng() * 0.10, 0.08 + rng() * 0.05, 0.55 + rng() * 0.20,
+      0.18 + rng() * 0.55);
   }
 
   // ── AMBIENT DEPTH PARTICLES (6%)
@@ -183,8 +184,8 @@ function generateAvaGeometry(count: number) {
 
     add(x, y, z,
       x / d * (0.7 + rng() * 1.4), y / d * (0.7 + rng() * 1.4), (rng() - 0.5) * 2.0,
-      0.22 + rng() * 0.10, 0.06 + rng() * 0.06, 0.42 + rng() * 0.16,
-      0.18 + rng() * 0.50);
+      0.16 + rng() * 0.08, 0.05 + rng() * 0.04, 0.32 + rng() * 0.14,
+      0.12 + rng() * 0.30);
   }
 
   return {
