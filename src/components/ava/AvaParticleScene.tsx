@@ -42,7 +42,7 @@ const VERTEX_SHADER = `
     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
 
     float sizeScale = max(0.15, 1.0 - uScrollProgress * 0.25);
-    gl_PointSize = aSize * sizeScale * (90.0 / -mvPosition.z);
+    gl_PointSize = aSize * sizeScale * (62.0 / -mvPosition.z);
 
     gl_Position = projectionMatrix * mvPosition;
   }
@@ -119,8 +119,22 @@ function generateAvaGeometry(count: number) {
 
   // ── 1. HEAD SHELL ───────────────────────────────────────────────────────────
   // Ellipsoid base: Rx=0.75, Ry=1.02, Rz=0.70, yOffset=0.36
-  // Front-biased sampling — back of head gets far fewer particles
+  // Front-biased — back of head gets far fewer particles.
+  // Eye socket zones excluded so orbital rims stay dark and readable.
   const headN = Math.floor(count * 0.30);
+
+  // Eye socket exclusion zones (must match orbital rim positions in section 2)
+  const socketZones = [
+    { cx: -0.278, cy: 0.218, rx: 0.165, ry: 0.108 },
+    { cx:  0.278, cy: 0.218, rx: 0.165, ry: 0.108 },
+  ];
+  const inSocket = (x: number, y: number) =>
+    socketZones.some(s => {
+      const dx = (x - s.cx) / s.rx;
+      const dy = (y - s.cy) / s.ry;
+      return dx * dx + dy * dy < 1.0;
+    });
+
   for (let i = 0; i < headN; i++) {
     const theta = rng() * Math.PI * 2;
     const phi   = Math.acos(1 - 2 * rng());
@@ -138,9 +152,12 @@ function generateAvaGeometry(count: number) {
     const y = r * 1.02 * cosP + 0.36;
     const z = r * 0.70 * sinP * Math.sin(theta);
 
-    const front   = (rawZ + 1) * 0.5;
-    const bright  = 0.28 + front * 0.55;
-    addS(x, y, z, N(0.75, 1.55), bright, N(0.18, 0.60));
+    // Skip if inside an eye socket zone — preserves the dark hollow
+    if (z > 0.55 && inSocket(x, y)) continue;
+
+    const front  = (rawZ + 1) * 0.5;
+    const bright = 0.28 + front * 0.55;
+    addS(x, y, z, N(0.75, 1.55), bright, N(0.06, 0.18));
   }
 
   // ── 2. ORBITAL RIMS — the single most important feature ────────────────────
@@ -169,7 +186,7 @@ function generateAvaGeometry(count: number) {
       // Socket recesses toward sides
       const z = ez - 0.020 * Math.abs(Math.cos(angle)) + N(-0.008, 0.008);
 
-      addS(x, y, z, N(0.9, 1.7), N(0.55, 0.95), N(0.22, 0.65));
+      addS(x, y, z, N(0.9, 1.7), N(0.55, 0.95), N(0.07, 0.20));
     }
 
     // Inner socket — sparse, slightly recessed (dark hollow effect)
@@ -181,7 +198,7 @@ function generateAvaGeometry(count: number) {
       const y     = ey + r * Math.sin(angle) * 0.88;
       const z     = ez - 0.030 + N(-0.008, 0.008);
 
-      addS(x, y, z, N(0.7, 1.3), N(0.28, 0.52), N(0.14, 0.40));
+      addS(x, y, z, N(0.7, 1.3), N(0.28, 0.52), N(0.04, 0.12));
     }
   }
 
@@ -200,7 +217,7 @@ function generateAvaGeometry(count: number) {
       const y      = 0.332 + arch + N(-0.015, 0.015);
       const z      = 0.705 + N(-0.012, 0.012);
 
-      addS(x, y, z, N(0.8, 1.5), N(0.45, 0.82), N(0.18, 0.55));
+      addS(x, y, z, N(0.8, 1.5), N(0.45, 0.82), N(0.06, 0.17));
     }
   }
 
@@ -214,7 +231,7 @@ function generateAvaGeometry(count: number) {
     const y  = 0.215 - t * 0.378;
     const x  = N(-0.028, 0.028);
     const z  = 0.742 + t * 0.075 + N(-0.008, 0.008);
-    addS(x, y, z, N(0.9, 1.6), N(0.50, 0.88), N(0.18, 0.52));
+    addS(x, y, z, N(0.9, 1.6), N(0.50, 0.88), N(0.06, 0.16));
   }
 
   // Tip: small rounded protrusion
@@ -225,7 +242,7 @@ function generateAvaGeometry(count: number) {
     const x     = r * Math.cos(angle);
     const y     = -0.148 + r * Math.sin(angle) * 0.68 + N(-0.008, 0.008);
     const z     = 0.820 - r * 0.42;
-    addS(x, y, z, N(0.8, 1.5), N(0.48, 0.84), N(0.16, 0.50));
+    addS(x, y, z, N(0.8, 1.5), N(0.48, 0.84), N(0.05, 0.15));
   }
 
   // Nostril arcs: two C-shaped loops below the tip
@@ -239,7 +256,7 @@ function generateAvaGeometry(count: number) {
       const x     = nx + r * Math.cos(angle);
       const y     = -0.238 + r * Math.sin(angle) * 0.68;
       const z     = 0.780 - r * 0.28 + N(-0.008, 0.008);
-      addS(x, y, z, N(0.7, 1.4), N(0.42, 0.80), N(0.15, 0.46));
+      addS(x, y, z, N(0.7, 1.4), N(0.42, 0.80), N(0.05, 0.14));
     }
   }
 
@@ -255,7 +272,7 @@ function generateAvaGeometry(count: number) {
     const x   = t * 0.172 + N(-0.014, 0.014);
     const y   = -0.312 + Math.max(0, bow) + N(-0.016, 0.016);
     const z   = 0.750 - 0.016 * t * t + N(-0.007, 0.007);
-    addS(x, y, z, N(0.8, 1.6), N(0.50, 0.88), N(0.18, 0.54));
+    addS(x, y, z, N(0.8, 1.6), N(0.50, 0.88), N(0.06, 0.16));
   }
 
   // Lower lip — fuller downward arc
@@ -266,7 +283,7 @@ function generateAvaGeometry(count: number) {
     const x    = t * 0.180 + N(-0.014, 0.014);
     const y    = -0.402 - arch + N(-0.018, 0.018);
     const z    = 0.748 + 0.012 * (1.0 - t * t) + N(-0.007, 0.007);
-    addS(x, y, z, N(0.8, 1.6), N(0.48, 0.86), N(0.18, 0.54));
+    addS(x, y, z, N(0.8, 1.6), N(0.48, 0.86), N(0.06, 0.16));
   }
 
   // ── 6. CHEEKBONES ──────────────────────────────────────────────────────────
@@ -282,7 +299,7 @@ function generateAvaGeometry(count: number) {
       const x     = cx + rx * Math.cos(angle) * N(0.3, 1.0) + N(-0.015, 0.015);
       const y     = 0.018 + ry * Math.sin(angle) * N(0.3, 1.0) + N(-0.015, 0.015);
       const z     = 0.640 + N(-0.022, 0.022);
-      addS(x, y, z, N(0.7, 1.4), N(0.32, 0.70), N(0.15, 0.48));
+      addS(x, y, z, N(0.7, 1.4), N(0.32, 0.70), N(0.05, 0.15));
     }
   }
 
@@ -298,7 +315,7 @@ function generateAvaGeometry(count: number) {
     const y  = -0.280 - (1 - absT) * 0.340 + N(-0.022, 0.022);
     const z  = 0.380 + (1 - absT) * 0.170 + N(-0.012, 0.012);
 
-    addS(x, y, z, N(0.7, 1.4), N(0.36, 0.72), N(0.16, 0.48));
+    addS(x, y, z, N(0.7, 1.4), N(0.36, 0.72), N(0.05, 0.15));
   }
 
   // Chin mass
@@ -310,7 +327,7 @@ function generateAvaGeometry(count: number) {
       r * Math.cos(angle) * 0.80,
       -0.595 + r * Math.sin(angle) * 0.65,
       0.558 - r * 0.38,
-      N(0.7, 1.3), N(0.38, 0.70), N(0.15, 0.46),
+      N(0.7, 1.3), N(0.38, 0.70), N(0.05, 0.14),
     );
   }
 
@@ -324,7 +341,7 @@ function generateAvaGeometry(count: number) {
       r * Math.cos(angle),
       y,
       r * Math.sin(angle) * 0.72,
-      N(0.6, 1.3), N(0.26, 0.58), N(0.14, 0.42),
+      N(0.6, 1.3), N(0.26, 0.58), N(0.05, 0.13),
     );
   }
 
@@ -340,7 +357,7 @@ function generateAvaGeometry(count: number) {
     addP(
       x, y, z,
       N(-1.2, 1.2), 1.4 + rng() * 2.0, N(-1.0, 1.0),
-      N(0.28, 0.60), N(0.16, 0.48),
+      N(0.28, 0.60), N(0.05, 0.14),
     );
   }
 
@@ -357,7 +374,7 @@ function generateAvaGeometry(count: number) {
       x * 0.36 + N(-1.3, 1.3),
       -(1.15 + rng() * 1.55),
       N(-1.4, 1.4),
-      N(0.20, 0.50), N(0.15, 0.42),
+      N(0.20, 0.50), N(0.05, 0.13),
     );
   }
 
@@ -372,7 +389,7 @@ function generateAvaGeometry(count: number) {
     addP(
       x, y, z,
       (x / d) * N(0.7, 1.5), (y / d) * N(0.7, 1.5), N(-1.0, 1.0),
-      N(0.14, 0.28), N(0.10, 0.28),
+      N(0.14, 0.28), N(0.04, 0.10),
     );
   }
 
@@ -400,7 +417,7 @@ const AvaParticleScene: React.FC<AvaParticleSceneProps> = ({ scrollProgress, cla
   const mouseRef    = useRef({ smoothX: 0, smoothY: 0 });
 
   const particleCount = useMemo(
-    () => (typeof window !== 'undefined' && window.innerWidth < 768 ? 9000 : 16000),
+    () => (typeof window !== 'undefined' && window.innerWidth < 768 ? 11000 : 22000),
     [],
   );
 
