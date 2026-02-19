@@ -505,7 +505,7 @@ function AvaParticles({ scrollProgress, faceData }: ParticlesProps) {
   });
 
   return (
-    <points ref={pointsRef} frustumCulled={false}>
+    <points ref={pointsRef} frustumCulled={false} scale={[1.6, 1.6, 1.6]}>
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" array={spherePos}           count={count} itemSize={3} />
         <bufferAttribute attach="attributes-aFacePos" array={faceData.positions}  count={count} itemSize={3} />
@@ -602,7 +602,7 @@ export default function AvaParticleScene({
     <div className={className} style={{ width: '100%', height: '100%' }}>
       <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
         <Canvas
-          camera={{ position: [0, 0.36, 5.2], fov: 56, near: 0.1, far: 100 }}
+          camera={{ position: [-0.3, 0.6, 3.6], fov: 60, near: 0.1, far: 100 }}
           gl={{
             alpha: true,
             antialias: false,
