@@ -12,7 +12,7 @@
  *  7. Mouse parallax       — face rotates toward cursor ("Ava looks at you")
  */
 
-import React, { useRef, useMemo, useEffect, useState } from 'react';
+import React, { useRef, useMemo, useEffect, useState, Component, ReactNode } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { AdaptiveDpr } from '@react-three/drei';
 import { EffectComposer, Bloom } from '@react-three/postprocessing';
@@ -538,6 +538,19 @@ function AvaParticles({ scrollProgress, faceData }: ParticlesProps) {
   );
 }
 
+// ─── Error boundary: prevents Canvas crashes from killing the page ────────────
+
+class CanvasErrorBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: ReactNode; fallback: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
+
 // ─── Outer component: Canvas + data loading + Bloom ──────────────────────────
 
 interface AvaParticleSceneProps {
@@ -567,24 +580,28 @@ export default function AvaParticleScene({
       loader.load(
         modelUrl,
         (gltf) => {
-          const meshes: THREE.Mesh[] = [];
-          gltf.scene.traverse(c => {
-            if ((c as THREE.Mesh).isMesh) meshes.push(c as THREE.Mesh);
-          });
+          try {
+            const meshes: THREE.Mesh[] = [];
+            gltf.scene.traverse(c => {
+              if ((c as THREE.Mesh).isMesh) meshes.push(c as THREE.Mesh);
+            });
 
-          if (!meshes.length) {
+            if (!meshes.length) {
+              setFaceData(makeFeminineGeometry(count));
+              return;
+            }
+
+            // Scale model to fit the scene (face occupies ~2 units vertically)
+            const box  = new THREE.Box3().setFromObject(gltf.scene);
+            const size = new THREE.Vector3();
+            box.getSize(size);
+            const sc  = 2.0 / Math.max(size.x, size.y, size.z);
+            const yOff = -box.getCenter(new THREE.Vector3()).y * sc + 0.36;
+
+            setFaceData(sampleWithMeshSurfaceSampler(meshes, count, sc, yOff));
+          } catch {
             setFaceData(makeFeminineGeometry(count));
-            return;
           }
-
-          // Scale model to fit the scene (face occupies ~2 units vertically)
-          const box  = new THREE.Box3().setFromObject(gltf.scene);
-          const size = new THREE.Vector3();
-          box.getSize(size);
-          const sc  = 2.0 / Math.max(size.x, size.y, size.z);
-          const yOff = -box.getCenter(new THREE.Vector3()).y * sc + 0.36;
-
-          setFaceData(sampleWithMeshSurfaceSampler(meshes, count, sc, yOff));
         },
         undefined,
         () => setFaceData(makeFeminineGeometry(count)),
@@ -600,6 +617,7 @@ export default function AvaParticleScene({
 
   return (
     <div className={className} style={{ width: '100%', height: '100%' }}>
+      <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
       <Canvas
         camera={{ position: [0, 0, 5.5], fov: 52, near: 0.1, far: 100 }}
         gl={{
@@ -624,6 +642,7 @@ export default function AvaParticleScene({
           />
         </EffectComposer>
       </Canvas>
+      </CanvasErrorBoundary>
     </div>
   );
 }
