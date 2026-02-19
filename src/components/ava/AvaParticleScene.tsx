@@ -1,655 +1,506 @@
-import React, { useRef, useEffect, useMemo } from 'react';
+/**
+ * AvaParticleScene — sphere-to-face morph particle system
+ *
+ * Technique: two position arrays (sphere + face) stored as buffer attributes.
+ * The vertex shader lerps between them using a `uMorph` uniform that GSAP
+ * animates 0 → 1 on mount, creating the "particles coalesce into a face"
+ * reveal effect used by high-end creative studios.
+ *
+ * Optionally pass `modelUrl="/your-head.glb"` to sample particles from a
+ * real 3-D head mesh (GLB) instead of the procedural feminine fallback.
+ */
+
+import React, { useRef, useMemo, useEffect, useState } from 'react';
+import { Canvas, useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import gsap from 'gsap';
 
-// ─── Vertex Shader ────────────────────────────────────────────────────────────
-const VERTEX_SHADER = `
-  attribute vec3 aVelocity;
+// ─── Vertex shader ─────────────────────────────────────────────────────────────
+// `position`  = sphere start positions  (attribute)
+// `aFacePos`  = face  target positions  (attribute)
+// `uMorph`    = GSAP-driven 0→1 blend   (uniform)
+const VERT = /* glsl */`
+  attribute vec3  aFacePos;
+  attribute vec3  aVelocity;
   attribute float aSize;
-  attribute vec3 aColor;
+  attribute vec3  aColor;
   attribute float aDelay;
 
   uniform float uTime;
-  uniform float uScrollProgress;
-  uniform vec2 uMouse;
+  uniform float uMorph;    // 0 = sphere, 1 = face
+  uniform float uScroll;
+  uniform vec2  uMouse;
 
-  varying vec3 vColor;
+  varying vec3  vColor;
   varying float vAlpha;
   varying float vBrightness;
 
   void main() {
     vColor = aColor;
 
-    vec3 pos = position;
+    // ── Core morph: sphere → face
+    vec3 pos = mix(position, aFacePos, uMorph);
 
-    float t = uScrollProgress * 1.8;
+    // ── Scroll dissolution (only once face is formed)
+    float t = uScroll * 1.8 * uMorph;
     pos += aVelocity * t * t;
 
-    float floatAmt = 1.0 - uScrollProgress;
-    pos.y += sin(uTime * 0.4 + aDelay) * 0.018 * floatAmt;
+    // ── Subtle organic float (only at full morph, no scroll)
+    float floatAmt = smoothstep(0.75, 1.0, uMorph) * (1.0 - uScroll);
+    pos.y += sin(uTime * 0.40 + aDelay)        * 0.018 * floatAmt;
     pos.x += cos(uTime * 0.32 + aDelay + 1.57) * 0.010 * floatAmt;
 
-    vAlpha = clamp(1.0 - t * 0.75, 0.0, 1.0);
+    // ── Alpha: fade in during morph, fade out on scroll
+    float morphFade  = smoothstep(0.0, 0.45, uMorph);
+    float scrollFade = clamp(1.0 - uScroll * 1.8 * 0.75, 0.0, 1.0);
+    vAlpha = morphFade * scrollFade;
 
-    vec3 lightPos = vec3(uMouse.x * 1.8, uMouse.y * 1.2 + 0.6, 2.2);
+    // ── Mouse-driven light
+    vec3  lightPos  = vec3(uMouse.x * 1.8, uMouse.y * 1.2 + 0.6, 2.2);
     float lightDist = distance(pos, lightPos);
     vBrightness = 1.0 + (1.0 / (1.0 + lightDist * lightDist * 0.5)) * 0.55;
 
-    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-
-    float sizeScale = max(0.15, 1.0 - uScrollProgress * 0.25);
-    gl_PointSize = aSize * sizeScale * (62.0 / -mvPosition.z);
-
-    gl_Position = projectionMatrix * mvPosition;
+    vec4  mvPos      = modelViewMatrix * vec4(pos, 1.0);
+    float sizeScale  = max(0.15, 1.0 - uScroll * 0.25);
+    gl_PointSize = aSize * sizeScale * (62.0 / -mvPos.z);
+    gl_Position  = projectionMatrix * mvPos;
   }
 `;
 
-const FRAGMENT_SHADER = `
-  varying vec3 vColor;
+// ─── Fragment shader ───────────────────────────────────────────────────────────
+const FRAG = /* glsl */`
+  varying vec3  vColor;
   varying float vAlpha;
   varying float vBrightness;
 
   void main() {
-    vec2 coord = gl_PointCoord - vec2(0.5);
-    float dist = length(coord);
-
+    vec2  coord = gl_PointCoord - 0.5;
+    float dist  = length(coord);
     if (dist > 0.5) discard;
 
-    float alpha = (1.0 - smoothstep(0.38, 0.5, dist)) * vAlpha;
+    float alpha = (1.0 - smoothstep(0.36, 0.5, dist)) * vAlpha;
     float glow  = max(0.0, 1.0 - dist * 2.2);
 
     vec3 color = vColor * vBrightness * (0.75 + glow * 0.25);
-    color = clamp(color, 0.0, 1.0);
-
-    gl_FragColor = vec4(color * alpha, alpha);
+    gl_FragColor = vec4(clamp(color, 0.0, 1.0) * alpha, alpha);
   }
 `;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-const rng = Math.random;
-const N = (min: number, max: number) => min + rng() * (max - min);
+const r = Math.random;
+const N = (a: number, b: number) => a + r() * (b - a);
 
-function outwardVel(x: number, y: number, z: number, speed: number) {
-  const d = Math.sqrt(x * x + y * y + z * z) + 0.001;
-  const sp = speed * N(0.55, 1.45);
-  return {
-    vx: (x / d) * sp + N(-0.65, 0.65),
-    vy: (y / d) * sp * 0.5 + N(-0.55, 0.55),
-    vz: (rng() < 0.5 ? 1 : -1) * sp * 1.7 + N(-0.45, 0.45),
-  };
+function vel(x: number, y: number, z: number, spd: number) {
+  const d  = Math.sqrt(x*x + y*y + z*z) + 0.001;
+  const sp = spd * N(0.55, 1.45);
+  return [
+    (x/d)*sp + N(-0.65, 0.65),
+    (y/d)*sp*0.5 + N(-0.55, 0.55),
+    (r() < 0.5 ? 1 : -1)*sp*1.7 + N(-0.45, 0.45),
+  ];
 }
 
-function purpleColor(bright: number) {
-  const lum = bright * N(0.52, 1.0);
-  return { r: lum * N(0.30, 0.44), g: lum * N(0.09, 0.17), b: lum * N(0.84, 0.99) };
+function purple(bright: number) {
+  const l = bright * N(0.52, 1.0);
+  return [l*N(0.28,0.44), l*N(0.08,0.17), l*N(0.82,0.99)];
 }
 
-// ─── Sample points uniformly on a GLTF mesh surface ──────────────────────────
-function sampleMeshPoints(
-  meshes: THREE.Mesh[],
-  count: number,
-  scale: number,
-  yOffset: number,
-) {
-  const positions: number[] = [];
-  const velocities: number[] = [];
-  const colors: number[] = [];
-  const sizes: number[] = [];
-  const delays: number[] = [];
-
-  // Collect all triangles with their areas
-  const triangles: { a: THREE.Vector3; b: THREE.Vector3; c: THREE.Vector3; area: number }[] = [];
-  let totalArea = 0;
-
-  const tmpA = new THREE.Vector3();
-  const tmpB = new THREE.Vector3();
-  const tmpC = new THREE.Vector3();
-  const tmpAB = new THREE.Vector3();
-  const tmpAC = new THREE.Vector3();
-
-  for (const mesh of meshes) {
-    const geo = mesh.geometry;
-    const posAttr = geo.getAttribute('position') as THREE.BufferAttribute;
-    if (!posAttr) continue;
-
-    const idx = geo.index;
-    const triCount = idx ? idx.count / 3 : posAttr.count / 3;
-
-    for (let i = 0; i < triCount; i++) {
-      const ia = idx ? idx.getX(i * 3)     : i * 3;
-      const ib = idx ? idx.getX(i * 3 + 1) : i * 3 + 1;
-      const ic = idx ? idx.getX(i * 3 + 2) : i * 3 + 2;
-
-      tmpA.fromBufferAttribute(posAttr, ia);
-      tmpB.fromBufferAttribute(posAttr, ib);
-      tmpC.fromBufferAttribute(posAttr, ic);
-
-      tmpAB.subVectors(tmpB, tmpA);
-      tmpAC.subVectors(tmpC, tmpA);
-      const area = tmpAB.cross(tmpAC).length() * 0.5;
-
-      triangles.push({ a: tmpA.clone(), b: tmpB.clone(), c: tmpC.clone(), area });
-      totalArea += area;
-    }
-  }
-
-  // Build CDF for weighted random triangle sampling
-  const cdf = new Float64Array(triangles.length);
-  let cum = 0;
-  for (let i = 0; i < triangles.length; i++) {
-    cum += triangles[i].area / totalArea;
-    cdf[i] = cum;
-  }
-
-  // Sample random barycentric points
-  const pt = new THREE.Vector3();
+// ─── Sphere positions (morph start) ───────────────────────────────────────────
+function makeSphere(count: number, radius = 1.62): Float32Array {
+  const a = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
-    // Binary search CDF
-    let lo = 0, hi = triangles.length - 1;
-    const r = rng();
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (cdf[mid] < r) lo = mid + 1; else hi = mid;
-    }
-    const { a, b, c } = triangles[lo];
-
-    // Uniform barycentric sampling
-    const u = rng(), v = rng();
-    const su = Math.sqrt(u);
-    const s = 1 - su, t = su * (1 - v), w = su * v;
-
-    pt.set(
-      a.x * s + b.x * t + c.x * w,
-      a.y * s + b.y * t + c.y * w,
-      a.z * s + b.z * t + c.z * w,
-    );
-
-    const x = pt.x * scale;
-    const y = pt.y * scale + yOffset;
-    const z = pt.z * scale;
-
-    const { vx, vy, vz } = outwardVel(x, y, z, N(0.8, 1.6));
-    const { r: cr, g: cg, b: cb } = purpleColor(N(0.35, 0.92));
-
-    positions.push(x, y, z);
-    velocities.push(vx, vy, vz);
-    colors.push(cr, cg, cb);
-    sizes.push(N(0.05, 0.18) * N(0.6, 1.2));
-    delays.push(rng() * Math.PI * 2);
+    const phi   = Math.acos(1 - 2*r());
+    const theta = r() * Math.PI * 2;
+    const rad   = radius * (0.88 + r() * 0.24);
+    a[i*3]   = rad * Math.sin(phi) * Math.cos(theta);
+    a[i*3+1] = rad * Math.cos(phi);
+    a[i*3+2] = rad * Math.sin(phi) * Math.sin(theta);
   }
+  return a;
+}
 
-  // Add shoulders + ambient (not on face mesh)
-  addShoulders(count * 0.12, positions, velocities, colors, sizes, delays);
-  addAmbient(count * 0.04, positions, velocities, colors, sizes, delays);
-
-  return {
-    positions: new Float32Array(positions),
-    velocities: new Float32Array(velocities),
-    colors: new Float32Array(colors),
-    sizes: new Float32Array(sizes),
-    delays: new Float32Array(delays),
-    count: positions.length / 3,
+// ─── Feminine face positions (morph target, procedural fallback) ────────────
+function makeFeminineGeometry(count: number) {
+  // Fixed per-region particle counts that always sum to exactly `count`
+  const C = {
+    head:     Math.floor(count * 0.27),
+    eyeRims:  Math.floor(count * 0.075),
+    eyeInner: Math.floor(count * 0.025),
+    brows:    Math.floor(count * 0.030),
+    nose:     Math.floor(count * 0.055),
+    lips:     Math.floor(count * 0.070),
+    cheeks:   Math.floor(count * 0.045),
+    jaw:      Math.floor(count * 0.045),
+    neck:     Math.floor(count * 0.040),
+    hair:     Math.floor(count * 0.080),
+    shoulder: Math.floor(count * 0.095),
+    ambient:  Math.floor(count * 0.045),
   };
-}
+  // Assign any rounding remainder to head
+  const used = Object.values(C).reduce((s, v) => s + v, 0);
+  C.head += count - used;
 
-function addShoulders(
-  n: number,
-  pos: number[], vel: number[], col: number[], siz: number[], del: number[],
-) {
-  for (let i = 0; i < n; i++) {
-    const x    = N(-1.85, 1.85);
-    const absX = Math.abs(x);
-    const y    = -1.06 - absX * 0.085 + N(-0.24, 0.24);
-    const z    = N(-0.35, 0.35) - 0.10;
-    pos.push(x, y, z);
-    vel.push(x * 0.36 + N(-1.3, 1.3), -(1.15 + rng() * 1.55), N(-1.4, 1.4));
-    const { r, g, b } = purpleColor(N(0.20, 0.50));
-    col.push(r, g, b);
-    siz.push(N(0.05, 0.13) * N(0.6, 1.2));
-    del.push(rng() * Math.PI * 2);
-  }
-}
-
-function addAmbient(
-  n: number,
-  pos: number[], vel: number[], col: number[], siz: number[], del: number[],
-) {
-  for (let i = 0; i < n; i++) {
-    const x = N(-3.8, 3.8), y = N(-3.0, 3.2), z = -(1.0 + rng() * 2.5);
-    const d = Math.sqrt(x * x + y * y) + 0.01;
-    pos.push(x, y, z);
-    vel.push((x / d) * N(0.7, 1.5), (y / d) * N(0.7, 1.5), N(-1.0, 1.0));
-    const { r, g, b } = purpleColor(N(0.14, 0.28));
-    col.push(r, g, b);
-    siz.push(N(0.04, 0.10) * N(0.6, 1.2));
-    del.push(rng() * Math.PI * 2);
-  }
-}
-
-// ─── Feminine Procedural Fallback ─────────────────────────────────────────────
-// Used when no GLB model is provided. Tuned for feminine proportions:
-// narrower jaw, higher cheekbones, fuller lips, tapered chin, elegant neck.
-function generateFeminineGeometry(count: number) {
-  const pos: number[] = [], vel: number[] = [], col: number[] = [];
+  const pos: number[] = [], vels: number[] = [], col: number[] = [];
   const siz: number[] = [], del: number[] = [];
 
-  const addP = (
+  const add = (
     x: number, y: number, z: number,
     vx: number, vy: number, vz: number,
     bright: number, size: number,
   ) => {
-    pos.push(x + N(-0.010, 0.010), y + N(-0.010, 0.010), z + N(-0.006, 0.006));
-    vel.push(vx, vy, vz);
-    const { r, g, b } = purpleColor(bright);
-    col.push(r, g, b);
-    siz.push(size * N(0.55, 1.20));
-    del.push(rng() * Math.PI * 2);
+    pos.push(x, y, z); vels.push(vx, vy, vz);
+    const [r2,g2,b2] = purple(bright); col.push(r2,g2,b2);
+    siz.push(size * N(0.55, 1.20)); del.push(r() * Math.PI * 2);
   };
 
-  const addS = (x: number, y: number, z: number, speed: number, bright: number, size: number) => {
-    const { vx, vy, vz } = outwardVel(x, y, z, speed);
-    addP(x, y, z, vx, vy, vz, bright, size);
+  const addS = (x:number, y:number, z:number, spd:number, bright:number, size:number) => {
+    const [vx,vy,vz] = vel(x,y,z,spd);
+    add(x+N(-0.009,0.009), y+N(-0.009,0.009), z+N(-0.005,0.005), vx,vy,vz, bright, size);
   };
 
-  // ── Feminine face constants
-  // Oval face: wider at cheeks, tapers to narrow chin (heart/oval shape)
-  const Rx = 0.66, Ry = 1.02, Rz = 0.68, yOff = 0.36;
+  // ── 1. HEAD SHELL — oval, jaw tapered, eye sockets masked
+  const EL = { cx:-0.248, cy:0.218, rx:0.160, ry:0.104 };
+  const ER = { cx: 0.248, cy:0.218, rx:0.160, ry:0.104 };
+  const inEye = (x:number,y:number) =>
+    ((x-EL.cx)/EL.rx)**2 + ((y-EL.cy)/EL.ry)**2 < 1 ||
+    ((x-ER.cx)/ER.rx)**2 + ((y-ER.cy)/ER.ry)**2 < 1;
 
-  // Eye socket exclusion zones — keep these dark so they read as eyes
-  const EYE_L = { cx: -0.248, cy: 0.218, rx: 0.158, ry: 0.102 };
-  const EYE_R = { cx:  0.248, cy: 0.218, rx: 0.158, ry: 0.102 };
-  const inEye = (x: number, y: number) =>
-    ((x - EYE_L.cx) / EYE_L.rx) ** 2 + ((y - EYE_L.cy) / EYE_L.ry) ** 2 < 1 ||
-    ((x - EYE_R.cx) / EYE_R.rx) ** 2 + ((y - EYE_R.cy) / EYE_R.ry) ** 2 < 1;
-
-  // ── 1. HEAD SURFACE (front-biased ellipsoid, eye sockets masked)
-  const headN = Math.floor(count * 0.26);
-  for (let i = 0; i < headN; i++) {
-    const theta = rng() * Math.PI * 2;
-    const phi   = Math.acos(1 - 2 * rng());
-    const sinP  = Math.sin(phi), cosP = Math.cos(phi);
-    const rawZ  = sinP * Math.sin(theta);
-    if (rawZ < -0.05 && rng() > 0.20) continue;
-
-    const r = 1.0 + (rng() < 0.75 ? 0 : N(-0.05, 0.05));
-    const x = r * Rx * sinP * Math.cos(theta);
-    const y = r * Ry * cosP + yOff;
-    const z = r * Rz * sinP * Math.sin(theta);
-
-    if (z > 0.52 && inEye(x, y)) continue;
-
-    // Narrow the jaw region — feminine faces taper below the cheekbones
-    const isJaw = y < -0.10 && y > -0.65;
-    if (isJaw) {
-      // Scale x inward to make jaw narrower: at y=-0.10 full width, at y=-0.62 only 50%
-      const taper = 1.0 - ((-y - 0.10) / 0.52) * 0.48;
-      if (Math.abs(x) > Rx * taper * 0.92 && rng() > 0.15) continue;
+  let n = 0;
+  while (n < C.head) {
+    const theta = r()*Math.PI*2, phi = Math.acos(1-2*r());
+    const sinP = Math.sin(phi), cosP = Math.cos(phi);
+    const rawZ = sinP*Math.sin(theta);
+    if (rawZ < -0.05 && r() > 0.20) continue;
+    const rr = 1 + (r()<0.75 ? 0 : N(-0.04,0.04));
+    const x = rr*0.65*sinP*Math.cos(theta);
+    const y = rr*1.02*cosP + 0.36;
+    const z = rr*0.68*sinP*Math.sin(theta);
+    if (z > 0.50 && inEye(x,y)) continue;
+    // Taper jaw inward (feminine oval)
+    if (y < -0.10 && y > -0.65) {
+      const taper = 1 - ((-y-0.10)/0.52)*0.50;
+      if (Math.abs(x) > 0.65*taper*0.92 && r() > 0.12) continue;
     }
-
-    const front = (rawZ + 1) * 0.5;
-    addS(x, y, z, N(0.75, 1.5), 0.28 + front * 0.55, N(0.05, 0.16));
+    const front = (rawZ+1)*0.5;
+    addS(x, y, z, N(0.75,1.5), 0.28+front*0.55, N(0.045,0.150));
+    n++;
   }
 
-  // ── 2. ORBITAL RIMS (feminine: larger-looking eyes, thinner rim)
-  const eyeN = Math.floor(count * 0.072);
-  const eyeDefs = [EYE_L, EYE_R];
+  // ── 2. ORBITAL RIMS — key feature; upper half brighter (lash effect)
+  const eyeDefs = [EL, ER];
+  const perRim  = Math.floor(C.eyeRims / 2);
   for (const { cx, cy } of eyeDefs) {
-    const perEye  = eyeN / 2;
-    const rimN    = Math.floor(perEye * 0.75);
-    const innerN  = Math.floor(perEye * 0.25);
-
-    for (let i = 0; i < rimN; i++) {
-      const angle = rng() * Math.PI * 2;
-      const fade  = rng() < 0.72 ? 1.0 : N(0.50, 0.95);
-      // Feminine: slightly larger eye, more horizontal (wider rw)
-      const rw = 0.148, rh = 0.095;
-      const x = cx + rw * Math.cos(angle) * fade + N(-0.008, 0.008);
-      const y = cy + rh * Math.sin(angle) * fade + N(-0.006, 0.006);
-      const z = 0.698 - 0.018 * Math.abs(Math.cos(angle)) + N(-0.007, 0.007);
-      // Upper lash line brighter (top half of rim)
-      const isUpper = Math.sin(angle) > 0;
-      addS(x, y, z, N(0.9, 1.7), isUpper ? N(0.65, 1.0) : N(0.50, 0.85), N(0.06, 0.18));
-    }
-
-    // Sparse inner socket — dark, recessed (eye depth illusion)
-    for (let i = 0; i < innerN; i++) {
-      const angle = rng() * Math.PI * 2;
-      const r     = rng() * 0.090;
-      const x     = cx + r * Math.cos(angle) * 1.45;
-      const y     = cy + r * Math.sin(angle) * 0.88;
-      const z     = 0.668 + N(-0.008, 0.008);
-      addS(x, y, z, N(0.6, 1.1), N(0.18, 0.38), N(0.03, 0.09));
+    for (let i = 0; i < perRim; i++) {
+      const angle = r()*Math.PI*2;
+      const fade  = r()<0.72 ? 1.0 : N(0.50,0.95);
+      const rw = 0.150, rh = 0.096;
+      const x = cx + rw*Math.cos(angle)*fade + N(-0.008,0.008);
+      const y = cy + rh*Math.sin(angle)*fade + N(-0.006,0.006);
+      const z = 0.698 - 0.018*Math.abs(Math.cos(angle)) + N(-0.007,0.007);
+      const upper = Math.sin(angle) > 0;
+      addS(x, y, z, N(0.9,1.7), upper ? N(0.68,1.0) : N(0.50,0.85), N(0.06,0.19));
     }
   }
 
-  // ── 3. EYEBROWS — feminine: higher arch, thinner, more lateral
-  const browN = Math.floor(count * 0.030);
-  for (const bxBase of [-0.255, 0.255]) {
-    for (let i = 0; i < browN / 2; i++) {
-      const t    = N(-1, 1);
-      const absT = Math.abs(t);
-      // Higher arch peak (feminine brow: peaks toward outer 1/3)
-      const arch = 0.028 * Math.max(0, 1.0 - Math.pow((absT - 0.55) / 0.45, 2));
-      const x    = bxBase + t * 0.168 + N(-0.014, 0.014);
-      const y    = 0.348 + arch + N(-0.012, 0.012);
-      const z    = 0.702 + N(-0.010, 0.010);
-      addS(x, y, z, N(0.8, 1.5), N(0.48, 0.85), N(0.05, 0.15));
+  // ── 3. EYE INNER — sparse/dark hollow depth illusion
+  const perInner = Math.floor(C.eyeInner / 2);
+  for (const { cx, cy } of eyeDefs) {
+    for (let i = 0; i < perInner; i++) {
+      const angle = r()*Math.PI*2, rr = r()*0.088;
+      addS(cx+rr*Math.cos(angle)*1.45, cy+rr*Math.sin(angle)*0.88, 0.665+N(-0.008,0.008), N(0.6,1.1), N(0.16,0.36), N(0.025,0.080));
     }
   }
 
-  // ── 4. NOSE — delicate, narrow
-  const noseTotal = Math.floor(count * 0.052);
-
-  // Bridge: very narrow, straight
-  for (let i = 0; i < Math.floor(noseTotal * 0.38); i++) {
-    const t = rng();
-    addS(N(-0.020, 0.020), 0.210 - t * 0.365, 0.744 + t * 0.072 + N(-0.007, 0.007), N(0.9, 1.6), N(0.50, 0.88), N(0.05, 0.14));
-  }
-  // Tip: small, refined
-  for (let i = 0; i < Math.floor(noseTotal * 0.22); i++) {
-    const angle = rng() * Math.PI * 2;
-    const r     = rng() * 0.052;
-    addS(r * Math.cos(angle), -0.152 + r * Math.sin(angle) * 0.65 + N(-0.007, 0.007), 0.818 - r * 0.38, N(0.8, 1.5), N(0.48, 0.84), N(0.04, 0.13));
-  }
-  // Nostrils: delicate C-arcs
-  for (let side = 0; side < 2; side++) {
-    const nx = (side === 0 ? -1 : 1) * 0.094;
-    for (let i = 0; i < Math.floor(noseTotal * 0.40) / 2; i++) {
-      const angle = -0.10 + rng() * Math.PI * 1.15;
-      const r     = N(0.026, 0.042);
-      addS(nx + r * Math.cos(angle), -0.232 + r * Math.sin(angle) * 0.65, 0.776 - r * 0.26 + N(-0.007, 0.007), N(0.7, 1.4), N(0.42, 0.80), N(0.04, 0.12));
+  // ── 4. EYEBROWS — high arch (feminine), thin
+  const perBrow = Math.floor(C.brows / 2);
+  for (const bx of [-0.252, 0.252]) {
+    for (let i = 0; i < perBrow; i++) {
+      const t = N(-1,1), aT = Math.abs(t);
+      const arch = 0.030 * Math.max(0, 1 - ((aT-0.52)/0.48)**2);
+      addS(bx+t*0.165+N(-0.012,0.012), 0.352+arch+N(-0.010,0.010), 0.704+N(-0.009,0.009), N(0.8,1.5), N(0.48,0.86), N(0.045,0.140));
     }
   }
 
-  // ── 5. LIPS — full and prominent (feminine feature)
-  const lipTotal = Math.floor(count * 0.065); // more than before
-
-  // Upper lip — pronounced Cupid's bow
-  for (let i = 0; i < Math.floor(lipTotal * 0.40); i++) {
-    const t   = N(-1, 1);
-    const bow = 0.026 * Math.max(0, 1.0 - Math.pow(Math.abs(Math.abs(t) - 0.42) / 0.58, 2)) - 0.008;
-    const x   = t * 0.178 + N(-0.012, 0.012);
-    const y   = -0.300 + bow + N(-0.014, 0.014);
-    const z   = 0.755 - 0.014 * t * t + N(-0.006, 0.006);
-    addS(x, y, z, N(0.85, 1.7), N(0.55, 0.95), N(0.06, 0.18));
+  // ── 5. NOSE — delicate
+  const nBridge = Math.floor(C.nose*0.38), nTip = Math.floor(C.nose*0.22), nNostril = C.nose - nBridge - nTip;
+  for (let i = 0; i < nBridge; i++) {
+    const t = r();
+    addS(N(-0.018,0.018), 0.210-t*0.365, 0.742+t*0.072+N(-0.007,0.007), N(0.9,1.6), N(0.50,0.88), N(0.045,0.135));
   }
-  // Lower lip — fuller, more rounded
-  for (let i = 0; i < Math.floor(lipTotal * 0.60); i++) {
-    const t    = N(-1, 1);
-    const arch = 0.022 * (1.0 - t * t);
-    const x    = t * 0.188 + N(-0.012, 0.012);
-    const y    = -0.388 - arch + N(-0.016, 0.016);
-    const z    = 0.752 + 0.016 * (1.0 - t * t) + N(-0.006, 0.006);
-    addS(x, y, z, N(0.85, 1.7), N(0.52, 0.92), N(0.06, 0.18));
+  for (let i = 0; i < nTip; i++) {
+    const a = r()*Math.PI*2, rr = r()*0.050;
+    addS(rr*Math.cos(a), -0.152+rr*Math.sin(a)*0.65+N(-0.007,0.007), 0.816-rr*0.38, N(0.8,1.5), N(0.46,0.82), N(0.038,0.120));
   }
-
-  // ── 6. HIGH CHEEKBONES (feminine: prominent, high, slightly wide)
-  const cheekN = Math.floor(count * 0.042);
-  for (const cx of [-0.390, 0.390]) {
-    for (let i = 0; i < cheekN / 2; i++) {
-      const angle = N(-0.5, 1.2) * Math.PI;
-      const x     = cx + 0.138 * Math.cos(angle) * N(0.3, 1.0) + N(-0.012, 0.012);
-      const y     = 0.062 + 0.108 * Math.sin(angle) * N(0.3, 1.0) + N(-0.012, 0.012);
-      const z     = 0.644 + N(-0.018, 0.018);
-      addS(x, y, z, N(0.75, 1.45), N(0.38, 0.75), N(0.05, 0.14));
+  const perNostril = Math.floor(nNostril/2);
+  for (const nx of [-0.092, 0.092]) {
+    for (let i = 0; i < perNostril; i++) {
+      const a = -0.10+r()*Math.PI*1.15, rr = N(0.024,0.040);
+      addS(nx+rr*Math.cos(a), -0.230+rr*Math.sin(a)*0.65, 0.774-rr*0.26+N(-0.007,0.007), N(0.7,1.4), N(0.42,0.80), N(0.035,0.110));
     }
   }
 
-  // ── 7. JAWLINE — feminine: narrow, gently curved, soft
-  // Jaw angle at ±0.36 (vs masculine ±0.60), gentle curve to chin
-  const jawTotal = Math.floor(count * 0.042);
-  for (let i = 0; i < jawTotal; i++) {
-    const t    = N(-1, 1);
-    const absT = Math.abs(t);
-    const x    = t * 0.360 * N(0.88, 1.08);
-    const y    = -0.272 - (1 - absT) * 0.338 + N(-0.018, 0.018);
-    const z    = 0.420 + (1 - absT) * 0.148 + N(-0.010, 0.010);
-    addS(x, y, z, N(0.7, 1.35), N(0.35, 0.70), N(0.04, 0.13));
+  // ── 6. LIPS — full, prominent (key feminine feature)
+  const nUpper = Math.floor(C.lips*0.40), nLower = C.lips - nUpper;
+  for (let i = 0; i < nUpper; i++) {
+    const t = N(-1,1);
+    const bow = 0.028 * Math.max(0, 1-((Math.abs(t)-0.40)/0.60)**2) - 0.009;
+    addS(t*0.180+N(-0.011,0.011), -0.295+bow+N(-0.013,0.013), 0.756-0.013*t*t+N(-0.006,0.006), N(0.85,1.7), N(0.58,0.96), N(0.055,0.175));
+  }
+  for (let i = 0; i < nLower; i++) {
+    const t = N(-1,1);
+    addS(t*0.190+N(-0.011,0.011), -0.382-0.023*(1-t*t)+N(-0.014,0.014), 0.752+0.017*(1-t*t)+N(-0.006,0.006), N(0.85,1.7), N(0.55,0.94), N(0.055,0.175));
   }
 
-  // Chin — narrow, slightly pointed (feminine)
-  const chinN = Math.floor(count * 0.015);
-  for (let i = 0; i < chinN; i++) {
-    const angle = rng() * Math.PI * 2;
-    const r     = rng() * 0.040; // narrower radius than masculine
-    addS(r * Math.cos(angle) * 0.65, -0.608 + r * Math.sin(angle) * 0.60, 0.568 - r * 0.35, N(0.7, 1.3), N(0.38, 0.70), N(0.04, 0.12));
+  // ── 7. HIGH CHEEKBONES
+  const perCheek = Math.floor(C.cheeks/2);
+  for (const cx of [-0.385, 0.385]) {
+    for (let i = 0; i < perCheek; i++) {
+      const a = N(-0.5,1.2)*Math.PI;
+      addS(cx+0.135*Math.cos(a)*N(0.3,1.0)+N(-0.011,0.011), 0.065+0.105*Math.sin(a)*N(0.3,1.0)+N(-0.011,0.011), 0.642+N(-0.016,0.016), N(0.75,1.45), N(0.38,0.76), N(0.045,0.135));
+    }
   }
 
-  // ── 8. NECK — long, slender (feminine proportion)
-  const neckN = Math.floor(count * 0.042);
-  for (let i = 0; i < neckN; i++) {
-    const angle = rng() * Math.PI * 2;
-    const r     = 0.112 + rng() * 0.058; // thinner than before
-    const y     = -0.85 + rng() * 0.48;  // slightly longer
-    addS(r * Math.cos(angle), y, r * Math.sin(angle) * 0.70, N(0.6, 1.3), N(0.26, 0.58), N(0.04, 0.12));
+  // ── 8. JAWLINE — narrow, feminine oval (max x ±0.355)
+  for (let i = 0; i < C.jaw; i++) {
+    const t = N(-1,1), aT = Math.abs(t);
+    addS(t*0.355*N(0.88,1.08), -0.268-(1-aT)*0.340+N(-0.016,0.016), 0.425+(1-aT)*0.143+N(-0.009,0.009), N(0.7,1.35), N(0.33,0.68), N(0.038,0.120));
   }
 
-  // ── 9. HAIR — long, flowing down sides (feminine silhouette)
-  const hairN = Math.floor(count * 0.075);
-  for (let i = 0; i < hairN; i++) {
-    const side  = rng() < 0.5 ? -1 : 1;
-    const isTop = rng() < 0.35;
+  // ── 9. NECK — slender
+  for (let i = 0; i < C.neck; i++) {
+    const a = r()*Math.PI*2, rr = 0.108+r()*0.055;
+    addS(rr*Math.cos(a), -0.84+r()*0.48, rr*Math.sin(a)*0.70, N(0.6,1.3), N(0.25,0.56), N(0.035,0.110));
+  }
 
-    if (isTop) {
-      // Crown / top of head
-      const angle = rng() * Math.PI * 2;
-      const rad   = 0.55 + rng() * 0.72;
-      const x     = Math.cos(angle) * rad * N(0.45, 1.0);
-      const y     = 1.20 + rng() * 1.60;
-      const z     = N(-0.28, 0.30);
-      pos.push(x, y, z);
-      vel.push(N(-1.0, 1.0), 1.6 + rng() * 2.0, N(-0.9, 0.9));
+  // ── 10. HAIR — long flowing (feminine silhouette)
+  for (let i = 0; i < C.hair; i++) {
+    const side = r()<0.5 ? -1 : 1;
+    let x:number, y:number, z:number, vx:number, vy:number, vz:number;
+    if (r() < 0.30) {
+      // Crown
+      const a = r()*Math.PI*2, rad = 0.52+r()*0.74;
+      x = Math.cos(a)*rad*N(0.42,1.0); y = 1.18+r()*1.65; z = N(-0.26,0.28);
+      vx = N(-1.0,1.0); vy = 1.6+r()*2.0; vz = N(-0.9,0.9);
     } else {
-      // Long flowing hair — cascades past shoulders
-      const t  = rng(); // 0 = crown, 1 = mid-back
-      const yH = 1.05 - t * 2.80;
-      const xH = side * (0.50 + t * 0.55 + N(-0.18, 0.18));
-      const zH = N(-0.38, 0.18);
-      pos.push(xH, yH, zH);
-      vel.push(side * N(0.8, 2.0), N(-0.5, 1.2), N(-1.0, 1.0));
+      // Long cascade down sides
+      const t = r();
+      x = side*(0.48+t*0.58+N(-0.16,0.16)); y = 1.08-t*2.90; z = N(-0.36,0.16);
+      vx = side*N(0.9,2.0); vy = N(-0.5,1.2); vz = N(-1.0,1.0);
     }
-
-    const { r, g, b } = purpleColor(N(0.28, 0.65));
-    col.push(r, g, b);
-    siz.push(N(0.04, 0.13) * N(0.55, 1.20));
-    del.push(rng() * Math.PI * 2);
+    const [r2,g2,b2] = purple(N(0.28,0.66));
+    pos.push(x,y,z); vels.push(vx,vy,vz); col.push(r2,g2,b2);
+    siz.push(N(0.032,0.118)*N(0.55,1.20)); del.push(r()*Math.PI*2);
   }
 
-  // ── 10. SHOULDERS
-  addShoulders(count * 0.088, pos, vel, col, siz, del);
+  // ── 11. SHOULDERS
+  for (let i = 0; i < C.shoulder; i++) {
+    const x = N(-1.85,1.85), aX = Math.abs(x);
+    const y = -1.04-aX*0.085+N(-0.22,0.22);
+    const z = N(-0.32,0.32)-0.10;
+    const [r2,g2,b2] = purple(N(0.20,0.50));
+    pos.push(x,y,z); vels.push(x*0.36+N(-1.3,1.3), -(1.15+r()*1.55), N(-1.4,1.4));
+    col.push(r2,g2,b2); siz.push(N(0.040,0.118)*N(0.55,1.20)); del.push(r()*Math.PI*2);
+  }
 
-  // ── 11. AMBIENT
-  addAmbient(count * 0.045, pos, vel, col, siz, del);
+  // ── 12. AMBIENT
+  for (let i = 0; i < C.ambient; i++) {
+    const x = N(-3.8,3.8), y = N(-3.0,3.2), z = -(1+r()*2.5);
+    const d = Math.sqrt(x*x+y*y)+0.01;
+    const [r2,g2,b2] = purple(N(0.12,0.26));
+    pos.push(x,y,z); vels.push((x/d)*N(0.7,1.5),(y/d)*N(0.7,1.5),N(-1,1));
+    col.push(r2,g2,b2); siz.push(N(0.028,0.088)*N(0.55,1.20)); del.push(r()*Math.PI*2);
+  }
 
   return {
     positions:  new Float32Array(pos),
-    velocities: new Float32Array(vel),
+    velocities: new Float32Array(vels),
     colors:     new Float32Array(col),
     sizes:      new Float32Array(siz),
     delays:     new Float32Array(del),
-    count:      pos.length / 3,
   };
 }
 
-// ─── Build Three.js geometry from raw arrays ──────────────────────────────────
-function buildGeometry(data: ReturnType<typeof generateFeminineGeometry>) {
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',  new THREE.BufferAttribute(data.positions,  3));
-  geo.setAttribute('aVelocity', new THREE.BufferAttribute(data.velocities, 3));
-  geo.setAttribute('aColor',    new THREE.BufferAttribute(data.colors,     3));
-  geo.setAttribute('aSize',     new THREE.BufferAttribute(data.sizes,      1));
-  geo.setAttribute('aDelay',    new THREE.BufferAttribute(data.delays,     1));
-  return geo;
+// ─── Sample points from a GLTF mesh (area-weighted barycentric) ───────────────
+function sampleGLTFMesh(
+  meshes: THREE.Mesh[], count: number, scale: number, yOff: number,
+) {
+  const tris: [THREE.Vector3,THREE.Vector3,THREE.Vector3][] = [];
+  const areas: number[] = [];
+  let total = 0;
+  const A=new THREE.Vector3(), B=new THREE.Vector3(), C=new THREE.Vector3();
+  const AB=new THREE.Vector3(), AC=new THREE.Vector3();
+
+  for (const m of meshes) {
+    const g = m.geometry, p = g.getAttribute('position') as THREE.BufferAttribute;
+    if (!p) continue;
+    const idx = g.index, tc = idx ? idx.count/3 : p.count/3;
+    for (let i = 0; i < tc; i++) {
+      const ia = idx?idx.getX(i*3):i*3, ib = idx?idx.getX(i*3+1):i*3+1, ic = idx?idx.getX(i*3+2):i*3+2;
+      A.fromBufferAttribute(p,ia); B.fromBufferAttribute(p,ib); C.fromBufferAttribute(p,ic);
+      AB.subVectors(B,A); AC.subVectors(C,A);
+      const area = AB.cross(AC).length()*0.5;
+      tris.push([A.clone(),B.clone(),C.clone()]); areas.push(area); total+=area;
+    }
+  }
+  const cdf = new Float64Array(tris.length);
+  let cum=0; for(let i=0;i<tris.length;i++){cum+=areas[i]/total;cdf[i]=cum;}
+
+  const positions:number[]=[], velocities:number[]=[], colors:number[]=[], sizes:number[]=[], delays:number[]=[];
+  const pt = new THREE.Vector3();
+  for (let i=0;i<count;i++) {
+    let lo=0, hi=tris.length-1; const rv=r();
+    while(lo<hi){const m=(lo+hi)>>1; cdf[m]<rv?lo=m+1:hi=m;}
+    const [a,b,c]=tris[lo];
+    const u=r(),v=r(),su=Math.sqrt(u),s=1-su,t=su*(1-v),w=su*v;
+    pt.set(a.x*s+b.x*t+c.x*w, a.y*s+b.y*t+c.y*w, a.z*s+b.z*t+c.z*w);
+    const x=pt.x*scale, y=pt.y*scale+yOff, z=pt.z*scale;
+    const [vx,vy,vz]=vel(x,y,z,N(0.8,1.6));
+    const [r2,g2,b2]=purple(N(0.35,0.92));
+    positions.push(x,y,z); velocities.push(vx,vy,vz); colors.push(r2,g2,b2);
+    sizes.push(N(0.045,0.165)*N(0.55,1.20)); delays.push(r()*Math.PI*2);
+  }
+  return { positions:new Float32Array(positions), velocities:new Float32Array(velocities), colors:new Float32Array(colors), sizes:new Float32Array(sizes), delays:new Float32Array(delays) };
 }
 
-// ─── Component ─────────────────────────────────────────────────────────────────
+// ─── Inner R3F component (uses hooks) ─────────────────────────────────────────
+interface ParticlesProps {
+  scrollProgress: number;
+  faceData: {
+    positions: Float32Array; velocities: Float32Array;
+    colors: Float32Array;    sizes: Float32Array; delays: Float32Array;
+  };
+}
+
+function AvaParticles({ scrollProgress, faceData }: ParticlesProps) {
+  const pointsRef  = useRef<THREE.Points>(null!);
+  const matRef     = useRef<THREE.ShaderMaterial>(null!);
+  const mouseRef   = useRef({ x:0, y:0, sx:0, sy:0 });
+
+  const count = faceData.positions.length / 3;
+
+  // Sphere start positions (same count as face)
+  const spherePos = useMemo(() => makeSphere(count), [count]);
+
+  // Stable uniforms object (never recreated)
+  const uniforms = useMemo(() => ({
+    uTime:   { value: 0 },
+    uMorph:  { value: 0 },
+    uScroll: { value: 0 },
+    uMouse:  { value: new THREE.Vector2(0,0) },
+  }), []);
+
+  // Trigger morph-in on mount
+  useEffect(() => {
+    gsap.to(uniforms.uMorph, {
+      value: 1, duration: 2.8, delay: 0.35, ease: 'power3.inOut',
+    });
+  }, [uniforms]);
+
+  // Mouse tracking
+  useEffect(() => {
+    const h = (e: MouseEvent) => {
+      mouseRef.current.x =  (e.clientX/window.innerWidth )*2-1;
+      mouseRef.current.y = -((e.clientY/window.innerHeight)*2-1);
+    };
+    window.addEventListener('mousemove', h);
+    return () => window.removeEventListener('mousemove', h);
+  }, []);
+
+  // Sync scroll
+  useEffect(() => {
+    uniforms.uScroll.value = scrollProgress;
+  }, [scrollProgress, uniforms]);
+
+  // Animation loop
+  useFrame((state) => {
+    uniforms.uTime.value = state.clock.elapsedTime;
+    const m = mouseRef.current;
+    m.sx += (m.x - m.sx)*0.058; m.sy += (m.y - m.sy)*0.058;
+    uniforms.uMouse.value.set(m.sx, m.sy);
+    if (pointsRef.current) {
+      const p = pointsRef.current;
+      p.rotation.y += (m.sx*0.30 - p.rotation.y)*0.055;
+      p.rotation.x += (-m.sy*0.22 - p.rotation.x)*0.055;
+    }
+  });
+
+  return (
+    <points ref={pointsRef}>
+      <bufferGeometry>
+        {/* position = sphere (morph start) */}
+        <bufferAttribute attach="attributes-position" array={spherePos}            count={count} itemSize={3} />
+        <bufferAttribute attach="attributes-aFacePos"  array={faceData.positions}  count={count} itemSize={3} />
+        <bufferAttribute attach="attributes-aVelocity" array={faceData.velocities} count={count} itemSize={3} />
+        <bufferAttribute attach="attributes-aColor"    array={faceData.colors}     count={count} itemSize={3} />
+        <bufferAttribute attach="attributes-aSize"     array={faceData.sizes}      count={count} itemSize={1} />
+        <bufferAttribute attach="attributes-aDelay"    array={faceData.delays}     count={count} itemSize={1} />
+      </bufferGeometry>
+      <shaderMaterial
+        ref={matRef}
+        vertexShader={VERT}
+        fragmentShader={FRAG}
+        uniforms={uniforms}
+        transparent
+        depthWrite={false}
+        blending={THREE.NormalBlending}
+        premultipliedAlpha
+      />
+    </points>
+  );
+}
+
+// ─── Outer component — Canvas wrapper ────────────────────────────────────────
 interface AvaParticleSceneProps {
   scrollProgress: number;
   className?: string;
-  /** Optional path to a GLB head model in /public, e.g. "/ava-head.glb"   */
+  /**
+   * Optional: path to a GLB head model in /public, e.g. "/ava-head.glb"
+   * When provided, particles are sampled from the real mesh surface.
+   * Without it the feminine procedural fallback is used.
+   */
   modelUrl?: string;
 }
 
-const AvaParticleScene: React.FC<AvaParticleSceneProps> = ({
-  scrollProgress,
-  className,
-  modelUrl,
-}) => {
-  const mountRef    = useRef<HTMLDivElement>(null);
-  const uniformsRef = useRef<Record<string, { value: unknown }> | null>(null);
-  const particleRef = useRef<THREE.Points | null>(null);
-  const rafRef      = useRef<number>(0);
-  const mouseRef    = useRef({ smoothX: 0, smoothY: 0 });
-
-  const particleCount = useMemo(
-    () => (typeof window !== 'undefined' && window.innerWidth < 768 ? 11000 : 22000),
-    [],
-  );
+export default function AvaParticleScene({ scrollProgress, className, modelUrl }: AvaParticleSceneProps) {
+  const count = typeof window !== 'undefined' && window.innerWidth < 768 ? 10000 : 22000;
+  const [faceData, setFaceData] = useState<ParticlesProps['faceData'] | null>(null);
 
   useEffect(() => {
-    const mount = mountRef.current;
-    if (!mount) return;
-
-    const scene  = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(52, mount.clientWidth / mount.clientHeight, 0.1, 100);
-    camera.position.set(0, 0, 5.5);
-
-    let renderer: THREE.WebGLRenderer;
-    try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
-    } catch { return; }
-
-    renderer.setSize(mount.clientWidth || window.innerWidth, mount.clientHeight || window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setClearColor(0x000000, 0);
-    renderer.domElement.style.background = 'transparent';
-    mount.appendChild(renderer.domElement);
-
-    const uniforms = {
-      uTime:           { value: 0 },
-      uScrollProgress: { value: 0 },
-      uMouse:          { value: new THREE.Vector2(0, 0) },
-    };
-    uniformsRef.current = uniforms as Record<string, { value: unknown }>;
-
-    const material = new THREE.ShaderMaterial({
-      vertexShader:    VERTEX_SHADER,
-      fragmentShader:  FRAGMENT_SHADER,
-      uniforms,
-      transparent:        true,
-      depthWrite:         false,
-      blending:           THREE.NormalBlending,
-      premultipliedAlpha: true,
-    });
-
-    let particles: THREE.Points | null = null;
-    let cancelled = false;
-
-    const initParticles = (data: ReturnType<typeof generateFeminineGeometry>) => {
-      if (cancelled) return;
-      const geo  = buildGeometry(data);
-      particles  = new THREE.Points(geo, material);
-      scene.add(particles);
-      particleRef.current = particles;
-    };
-
     if (modelUrl) {
-      // ── Load real GLB and sample points on the mesh surface
       const loader = new GLTFLoader();
       loader.load(
         modelUrl,
         (gltf) => {
           const meshes: THREE.Mesh[] = [];
-          gltf.scene.traverse((child) => {
-            if ((child as THREE.Mesh).isMesh) meshes.push(child as THREE.Mesh);
-          });
-
-          if (meshes.length === 0) {
-            // Fallback if no meshes found
-            initParticles(generateFeminineGeometry(particleCount));
-            return;
-          }
-
-          // Auto-scale: normalise model to fit our scene
-          const box    = new THREE.Box3().setFromObject(gltf.scene);
-          const size   = new THREE.Vector3();
-          box.getSize(size);
-          const scale  = 2.0 / Math.max(size.x, size.y, size.z);
-          const yOff   = -box.getCenter(new THREE.Vector3()).y * scale + 0.36;
-
-          const data = sampleMeshPoints(meshes, particleCount, scale, yOff);
-          initParticles(data);
+          gltf.scene.traverse(c => { if ((c as THREE.Mesh).isMesh) meshes.push(c as THREE.Mesh); });
+          if (!meshes.length) { setFaceData(makeFeminineGeometry(count)); return; }
+          const box = new THREE.Box3().setFromObject(gltf.scene);
+          const sz  = new THREE.Vector3(); box.getSize(sz);
+          const sc  = 2.0/Math.max(sz.x,sz.y,sz.z);
+          const yO  = -box.getCenter(new THREE.Vector3()).y*sc+0.36;
+          setFaceData(sampleGLTFMesh(meshes, count, sc, yO));
         },
         undefined,
-        () => {
-          // Load error — fall through to procedural
-          initParticles(generateFeminineGeometry(particleCount));
-        },
+        () => setFaceData(makeFeminineGeometry(count)),
       );
     } else {
-      // ── Procedural feminine geometry (no model provided)
-      initParticles(generateFeminineGeometry(particleCount));
+      setFaceData(makeFeminineGeometry(count));
     }
+  }, [count, modelUrl]);
 
-    // ── Mouse
-    const quickX = gsap.quickTo(mouseRef.current, 'smoothX', { duration: 0.85, ease: 'power2.out' });
-    const quickY = gsap.quickTo(mouseRef.current, 'smoothY', { duration: 0.85, ease: 'power2.out' });
-    const onMouse = (e: MouseEvent) => {
-      quickX((e.clientX / window.innerWidth)  * 2 - 1);
-      quickY(-((e.clientY / window.innerHeight) * 2 - 1));
-    };
-    window.addEventListener('mousemove', onMouse);
-
-    // ── Resize
-    const onResize = () => {
-      if (!mount) return;
-      camera.aspect = mount.clientWidth / mount.clientHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(mount.clientWidth, mount.clientHeight);
-    };
-    window.addEventListener('resize', onResize);
-
-    // ── Animate
-    const startTime = Date.now();
-    const animate = () => {
-      rafRef.current = requestAnimationFrame(animate);
-      uniforms.uTime.value = (Date.now() - startTime) / 1000;
-      (uniforms.uMouse.value as THREE.Vector2).set(mouseRef.current.smoothX, mouseRef.current.smoothY);
-      if (particles) {
-        const tY = mouseRef.current.smoothX * 0.30;
-        const tX = -mouseRef.current.smoothY * 0.22;
-        particles.rotation.y += (tY - particles.rotation.y) * 0.055;
-        particles.rotation.x += (tX - particles.rotation.x) * 0.055;
-      }
-      renderer.render(scene, camera);
-    };
-    animate();
-
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafRef.current);
-      window.removeEventListener('mousemove', onMouse);
-      window.removeEventListener('resize', onResize);
-      material.dispose();
-      renderer.dispose();
-      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
-    };
-  }, [particleCount, modelUrl]);
-
-  useEffect(() => {
-    if (uniformsRef.current) {
-      (uniformsRef.current.uScrollProgress as { value: number }).value = scrollProgress;
-    }
-  }, [scrollProgress]);
+  if (!faceData) return <div className={className} style={{ width:'100%', height:'100%' }} />;
 
   return (
-    <div
-      ref={mountRef}
-      className={className}
-      style={{ width: '100%', height: '100%', display: 'block' }}
-    />
+    <div className={className} style={{ width:'100%', height:'100%' }}>
+      <Canvas
+        camera={{ position: [0,0,5.5], fov: 52, near: 0.1, far: 100 }}
+        gl={{ alpha: true, antialias: true, powerPreference: 'high-performance' }}
+        style={{ background: 'transparent' }}
+        dpr={[1, 2]}
+      >
+        <AvaParticles scrollProgress={scrollProgress} faceData={faceData} />
+      </Canvas>
+    </div>
   );
-};
-
-export default AvaParticleScene;
+}
