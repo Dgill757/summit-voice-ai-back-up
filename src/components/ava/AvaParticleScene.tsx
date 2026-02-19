@@ -15,7 +15,6 @@
 import React, { useRef, useMemo, useEffect, useState, Component, ReactNode } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { AdaptiveDpr } from '@react-three/drei';
-import { EffectComposer, Bloom } from '@react-three/postprocessing';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshSurfaceSampler } from 'three/examples/jsm/math/MeshSurfaceSampler.js';
@@ -631,16 +630,6 @@ export default function AvaParticleScene({
         <AdaptiveDpr pixelated />   {/* auto-lower resolution if GPU is struggling */}
 
         <AvaParticles scrollProgress={scrollProgress} faceData={faceData} />
-
-        {/* Bloom — amplifies particle glow, creates ethereal purple aura */}
-        <EffectComposer>
-          <Bloom
-            luminanceThreshold={0.15}
-            luminanceSmoothing={0.85}
-            intensity={1.6}
-            mipmapBlur
-          />
-        </EffectComposer>
       </Canvas>
       </CanvasErrorBoundary>
     </div>
