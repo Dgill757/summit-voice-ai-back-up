@@ -197,240 +197,234 @@ function sampleWithMeshSurfaceSampler(
   return { positions, normals, randoms, colors, sizes, delays };
 }
 
-// ─── Procedural fallback: feminine face + hair geometry ───────────────────────
+// ─── Procedural fallback: 2D outline-based feminine face ──────────────────────
+//
+// Strategy: trace CONTOURS of facial features (oval ring, eye circles, lip
+// curves, brow arcs) instead of filling a 3D head volume.  Contour-based faces
+// are instantly readable at any size and avoid the "white blob" caused by
+// thousands of overlapping additive particles at the nose centre.
+//
+// Coordinate space (before the 1.6× group scale applied in JSX):
+//   x: –0.65 … +0.65   (face width ~1.3 units)
+//   y: –1.15 … +2.95   (chin to top of hair)
+//   z: –0.15 … +0.15   (very shallow — camera-facing plane)
 
 function makeFeminineGeometry(count: number): FaceData {
   const C = {
-    head:     Math.floor(count * 0.24),
-    eyeRims:  Math.floor(count * 0.075),
-    eyeInner: Math.floor(count * 0.025),
-    brows:    Math.floor(count * 0.030),
-    nose:     Math.floor(count * 0.055),
-    lips:     Math.floor(count * 0.075),
-    cheeks:   Math.floor(count * 0.060),
-    jaw:      Math.floor(count * 0.045),
-    neck:     Math.floor(count * 0.040),
-    hair:     Math.floor(count * 0.110),
-    shoulder: Math.floor(count * 0.085),
-    ambient:  Math.floor(count * 0.055),
+    headRing:  Math.floor(count * 0.090), // face oval outline ring
+    eyeLeft:   Math.floor(count * 0.065), // left eye circle (bright)
+    eyeRight:  Math.floor(count * 0.065), // right eye circle (bright)
+    iris:      Math.floor(count * 0.025), // iris fill dots
+    brows:     Math.floor(count * 0.048), // eyebrow arcs
+    nose:      Math.floor(count * 0.038), // nose bridge + tip + nostrils
+    lipsUp:    Math.floor(count * 0.055), // upper lip Cupid's bow
+    lipsLow:   Math.floor(count * 0.060), // lower lip (fuller)
+    cheeks:    Math.floor(count * 0.038), // cheekbone highlight arcs
+    jaw:       Math.floor(count * 0.040), // jawline curve
+    neck:      Math.floor(count * 0.028), // neck column
+    hair:      Math.floor(count * 0.255), // hair (dominant — crown + cascades)
+    shoulder:  Math.floor(count * 0.065), // shoulders
+    fill:      Math.floor(count * 0.055), // dim sparse face interior
+    ambient:   Math.floor(count * 0.040), // floating atmosphere
   };
   const used = Object.values(C).reduce((s, v) => s + v, 0);
-  C.head += count - used;
+  C.hair += count - used; // assign rounding remainder to hair
 
   const pos: number[] = [], nrm: number[] = [], rng2: number[] = [];
   const col: number[] = [], sz: number[] = [], del: number[] = [];
 
-  function push(x: number, y: number, z: number, bright: number, size: number) {
-    pos.push(x, y, z);
-    const [nx, ny, nz] = faceNormal(x, y, z);
-    nrm.push(nx, ny, nz);
+  // ch: 0=purple  1=pink/rose  2=electric-blue  3=white-hot
+  function push(x: number, y: number, z: number,
+                bright: number, size: number, ch = 0) {
+    const l = bright * rng(0.62, 1.0);
+    let r: number, g: number, b: number;
+    if      (ch === 1) { r = l*rng(0.78,1.00); g = l*rng(0.10,0.28); b = l*rng(0.52,0.78); }
+    else if (ch === 2) { r = l*rng(0.06,0.22); g = l*rng(0.38,0.68); b = l*rng(0.90,1.00); }
+    else if (ch === 3) { r = l*rng(0.85,1.00); g = l*rng(0.80,1.00); b = l*rng(0.88,1.00); }
+    else               { r = l*rng(0.28,0.48); g = l*rng(0.05,0.16); b = l*rng(0.85,1.00); }
+    pos.push(x + rng(-0.005,0.005), y + rng(-0.005,0.005), z + rng(-0.004,0.004));
+    nrm.push(0, 0, 1);           // all normals face camera
     rng2.push(rnd());
-    const [r, g, b] = particleColor(bright);
     col.push(r, g, b);
-    sz.push(size * rng(0.65, 1.25));
+    sz.push(size * rng(0.72, 1.28));
     del.push(rnd() * Math.PI * 2);
   }
 
-  function add(x: number, y: number, z: number, bright: number, size: number) {
-    push(
-      x + rng(-0.009, 0.009),
-      y + rng(-0.009, 0.009),
-      z + rng(-0.005, 0.005),
-      bright, size,
-    );
+  function autoColor(): number {
+    const h = rnd();
+    return h < 0.50 ? 0 : h < 0.75 ? 1 : h < 0.88 ? 2 : 3;
   }
 
-  // ── HEAD SHELL
-  const EL = { cx: -0.248, cy: 0.218, rx: 0.165, ry: 0.108 };
-  const ER = { cx:  0.248, cy: 0.218, rx: 0.165, ry: 0.108 };
-  const inEye = (x: number, y: number) =>
-    ((x-EL.cx)/EL.rx)**2 + ((y-EL.cy)/EL.ry)**2 < 1.0 ||
-    ((x-ER.cx)/ER.rx)**2 + ((y-ER.cy)/ER.ry)**2 < 1.0;
-
-  let n = 0;
-  while (n < C.head) {
-    const theta = rnd() * Math.PI * 2;
-    const phi   = Math.acos(1 - 2 * rnd());
-    const sinP  = Math.sin(phi), cosP = Math.cos(phi);
-    const rawZ  = sinP * Math.sin(theta);
-    if (rawZ < -0.05 && rnd() > 0.20) continue;
-    const rr = 1 + (rnd() < 0.75 ? 0 : rng(-0.04, 0.04));
-    const x = rr * 0.66 * sinP * Math.cos(theta);
-    const y = rr * 1.03 * cosP + 0.36;
-    const z = rr * 0.69 * sinP * Math.sin(theta);
-    if (z > 0.48 && inEye(x, y)) continue;
-    if (y < -0.10 && y > -0.68) {
-      const t = 1 - ((-y - 0.10) / 0.54) * 0.52;
-      if (Math.abs(x) > 0.66 * t * 0.92 && rnd() > 0.12) continue;
-    }
-    const front = (rawZ + 1) * 0.5;
-    add(x, y, z, 0.30 + front * 0.60, rng(0.10, 0.28));
-    n++;
+  // ── HEAD OVAL RING — face silhouette contour (NOT filled)
+  // Oval: rx=0.62 temples, taller forehead (sa>0) than chin (sa<0)
+  for (let i = 0; i < C.headRing; i++) {
+    const a  = rnd() * Math.PI * 2;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const rx = 0.62 + rng(-0.018, 0.018);
+    const ry = sa > 0 ? 0.88 + rng(-0.018, 0.018) : 0.70 + rng(-0.018, 0.018);
+    push(rx * ca, ry * sa + 0.16, rng(-0.02, 0.02),
+         rng(0.42, 0.78), rng(0.07, 0.17));
   }
 
-  // ── ORBITAL RIMS (bright eye edges)
-  const eyeDefs = [EL, ER];
-  const perRim  = Math.floor(C.eyeRims / 2);
-  for (const { cx, cy } of eyeDefs) {
-    for (let i = 0; i < perRim; i++) {
-      const a    = rnd() * Math.PI * 2;
-      const fade = rnd() < 0.72 ? 1.0 : rng(0.50, 0.95);
-      const x = cx + 0.152 * Math.cos(a) * fade + rng(-0.008, 0.008);
-      const y = cy + 0.098 * Math.sin(a) * fade + rng(-0.006, 0.006);
-      const z = 0.700 - 0.018 * Math.abs(Math.cos(a)) + rng(-0.007, 0.007);
-      add(x, y, z, Math.sin(a) > 0 ? rng(0.72, 1.0) : rng(0.55, 0.88), rng(0.12, 0.32));
+  // ── EYE RINGS — bright elliptical halos, upper half brighter (lash effect)
+  const eyeCentres = [{ ex: -0.245, ey: 0.245 }, { ex: 0.245, ey: 0.245 }];
+  const eyeCounts  = [C.eyeLeft, C.eyeRight];
+  for (let ei = 0; ei < 2; ei++) {
+    const { ex, ey } = eyeCentres[ei];
+    for (let i = 0; i < eyeCounts[ei]; i++) {
+      const a      = rnd() * Math.PI * 2;
+      const spread = rng(0.88, 1.12);
+      const x      = ex + 0.158 * spread * Math.cos(a);
+      const y      = ey + 0.100 * spread * Math.sin(a);
+      const bright = Math.sin(a) > 0 ? rng(0.80, 1.00) : rng(0.52, 0.78);
+      const ch     = rnd() < 0.40 ? 2 : rnd() < 0.50 ? 3 : 0; // blue / white / purple
+      push(x, y, 0.08, bright, rng(0.11, 0.26), ch);
     }
   }
 
-  // ── EYE INNER
-  const perInner = Math.floor(C.eyeInner / 2);
-  for (const { cx, cy } of eyeDefs) {
-    for (let i = 0; i < perInner; i++) {
-      const a  = rnd() * Math.PI * 2;
-      const rr = rnd() * 0.090;
-      add(cx + rr * Math.cos(a) * 1.45, cy + rr * Math.sin(a) * 0.88,
-          0.668 + rng(-0.008, 0.008), rng(0.18, 0.42), rng(0.06, 0.14));
+  // ── IRIS — soft blue glow inside each eye
+  for (const { ex, ey } of eyeCentres) {
+    const n = Math.floor(C.iris / 2);
+    for (let i = 0; i < n; i++) {
+      const a = rnd() * Math.PI * 2;
+      const r = rnd() * 0.070;
+      push(ex + r * Math.cos(a) * 1.45, ey + r * Math.sin(a) * 0.90,
+           0.06, rng(0.22, 0.52), rng(0.05, 0.13), 2);
     }
   }
 
-  // ── EYEBROWS
-  const perBrow = Math.floor(C.brows / 2);
-  for (const bx of [-0.252, 0.252]) {
-    for (let i = 0; i < perBrow; i++) {
-      const t  = rng(-1, 1);
-      const at = Math.abs(t);
-      const arch = 0.030 * Math.max(0, 1 - ((at - 0.52) / 0.48) ** 2);
-      add(bx + t * 0.168 + rng(-0.012, 0.012), 0.355 + arch + rng(-0.010, 0.010),
-          0.706 + rng(-0.009, 0.009), rng(0.55, 0.95), rng(0.08, 0.22));
+  // ── EYEBROWS — high feminine arch
+  for (const ex of [-0.245, 0.245]) {
+    const n = Math.floor(C.brows / 2);
+    for (let i = 0; i < n; i++) {
+      const t    = rng(-1, 1);
+      const arch = 0.026 * (1 - Math.abs(t));
+      push(ex + t * 0.158, 0.378 + arch, 0.09,
+           rng(0.58, 0.94), rng(0.06, 0.17));
     }
   }
 
-  // ── NOSE
-  const nBridge  = Math.floor(C.nose * 0.38);
-  const nTip     = Math.floor(C.nose * 0.22);
-  const nNostril = C.nose - nBridge - nTip;
-  for (let i = 0; i < nBridge; i++) {
-    const t = rnd();
-    add(rng(-0.018, 0.018), 0.210 - t * 0.365, 0.744 + t * 0.072, rng(0.52, 0.90), rng(0.08, 0.22));
-  }
-  for (let i = 0; i < nTip; i++) {
-    const a = rnd() * Math.PI * 2, rr = rnd() * 0.052;
-    add(rr * Math.cos(a), -0.150 + rr * Math.sin(a) * 0.65, 0.818 - rr * 0.38, rng(0.50, 0.88), rng(0.07, 0.20));
-  }
-  const perN = Math.floor(nNostril / 2);
-  for (const nx of [-0.094, 0.094]) {
-    for (let i = 0; i < perN; i++) {
-      const a  = -0.10 + rnd() * Math.PI * 1.15;
-      const rr = rng(0.024, 0.040);
-      add(nx + rr * Math.cos(a), -0.228 + rr * Math.sin(a) * 0.65,
-          0.776 - rr * 0.26, rng(0.45, 0.82), rng(0.06, 0.18));
+  // ── NOSE — delicate bridge, tip, nostrils
+  for (let i = 0; i < C.nose; i++) {
+    const q = rnd();
+    if (q < 0.42) {
+      // Bridge line
+      push(rng(-0.013, 0.013), 0.155 - rnd() * 0.245, 0.10,
+           rng(0.48, 0.82), rng(0.05, 0.13));
+    } else if (q < 0.68) {
+      // Tip
+      const a = rnd() * Math.PI * 2;
+      push(rnd() * 0.032 * Math.cos(a), -0.108 + rnd() * 0.026 * Math.sin(a),
+           0.13, rng(0.52, 0.86), rng(0.05, 0.13));
+    } else {
+      // Nostrils
+      const s = rnd() < 0.5 ? -1 : 1;
+      push(s * (0.064 + rnd() * 0.024), -0.148 + rng(-0.012, 0.012),
+           0.11, rng(0.42, 0.78), rng(0.04, 0.11));
     }
   }
 
-  // ── LIPS (bright, full)
-  const nUpper = Math.floor(C.lips * 0.40);
-  const nLower = C.lips - nUpper;
-  for (let i = 0; i < nUpper; i++) {
+  // ── UPPER LIP — Cupid's bow (pink)
+  for (let i = 0; i < C.lipsUp; i++) {
+    const t   = rng(-1, 1);
+    const bow = 0.022 * Math.max(0, 1 - ((Math.abs(t) - 0.35) / 0.65) ** 2) - 0.005;
+    push(t * 0.178, -0.278 + bow, 0.11, rng(0.72, 1.00), rng(0.09, 0.23), 1);
+  }
+
+  // ── LOWER LIP — fuller curve (pink)
+  for (let i = 0; i < C.lipsLow; i++) {
     const t = rng(-1, 1);
-    const bow = 0.028 * Math.max(0, 1 - ((Math.abs(t) - 0.40) / 0.60) ** 2) - 0.009;
-    add(t * 0.182 + rng(-0.011, 0.011), -0.292 + bow + rng(-0.013, 0.013),
-        0.758 - 0.013 * t * t, rng(0.65, 1.0), rng(0.10, 0.28));
-  }
-  for (let i = 0; i < nLower; i++) {
-    const t = rng(-1, 1);
-    add(t * 0.192 + rng(-0.011, 0.011),
-        -0.380 - 0.024 * (1 - t*t) + rng(-0.014, 0.014),
-        0.754 + 0.018 * (1 - t*t), rng(0.62, 1.0), rng(0.10, 0.28));
+    push(t * 0.188, -0.358 - 0.022 * (1 - t * t), 0.11,
+         rng(0.70, 1.00), rng(0.09, 0.23), 1);
   }
 
-  // ── HIGH CHEEKBONES
-  const perCheek = Math.floor(C.cheeks / 2);
-  for (const cx of [-0.388, 0.388]) {
-    for (let i = 0; i < perCheek; i++) {
-      const a = rng(-0.5, 1.2) * Math.PI;
-      add(cx + 0.136 * Math.cos(a) * rng(0.3, 1.0) + rng(-0.011, 0.011),
-          0.068 + 0.108 * Math.sin(a) * rng(0.3, 1.0) + rng(-0.011, 0.011),
-          0.644 + rng(-0.016, 0.016), rng(0.45, 0.85), rng(0.08, 0.22));
+  // ── CHEEKBONES — soft arc highlight on each side
+  for (const cx of [-0.355, 0.355]) {
+    const n = Math.floor(C.cheeks / 2);
+    for (let i = 0; i < n; i++) {
+      push(cx + rng(-0.105, 0.105), 0.052 + rng(-0.072, 0.072), rng(0.03, 0.09),
+           rng(0.28, 0.60), rng(0.05, 0.15));
     }
   }
 
-  // ── JAWLINE
+  // ── JAWLINE — lower parabolic arc
   for (let i = 0; i < C.jaw; i++) {
     const t  = rng(-1, 1);
     const at = Math.abs(t);
-    add(t * 0.358 * rng(0.88, 1.08),
-        -0.270 - (1 - at) * 0.342 + rng(-0.016, 0.016),
-        0.426 + (1 - at) * 0.145 + rng(-0.009, 0.009),
-        rng(0.38, 0.75), rng(0.07, 0.18));
+    push(t * 0.47 * (0.82 + at * 0.18), -0.50 - (1 - at * at) * 0.22, rng(0, 0.05),
+         rng(0.30, 0.62), rng(0.06, 0.15));
   }
 
-  // ── NECK
+  // ── NECK — slender column
   for (let i = 0; i < C.neck; i++) {
-    const a  = rnd() * Math.PI * 2;
-    const rr = 0.110 + rnd() * 0.055;
-    add(rr * Math.cos(a), -0.84 + rnd() * 0.48, rr * Math.sin(a) * 0.70,
-        rng(0.28, 0.62), rng(0.06, 0.16));
+    push(rng(-0.112, 0.112), -0.72 - rnd() * 0.40, rng(-0.01, 0.05),
+         rng(0.20, 0.50), rng(0.04, 0.13));
   }
 
-  // ── HAIR — long, flowing, full volume (crown + cascades + wisps)
+  // ── HAIR — large volumetric area: crown + long cascades + face-framing + wisps
   for (let i = 0; i < C.hair; i++) {
     const side = rnd() < 0.5 ? -1 : 1;
-    let x: number, y: number, z: number;
-    const r = rnd();
-    if (r < 0.25) {
-      // Crown volume — thick top
-      const a = rnd() * Math.PI * 2, rad = rng(0.48, 1.30);
-      x = Math.cos(a) * rad * rng(0.40, 1.0);
-      y = 1.15 + rnd() * 1.80;
-      z = rng(-0.30, 0.32);
-    } else if (r < 0.65) {
-      // Long cascade down sides
+    let x: number, y: number, z: number, bright: number, size: number;
+    const q = rnd();
+    if (q < 0.22) {
+      // Crown — thick top above forehead
+      const a = rnd() * Math.PI * 2, rad = rng(0.22, 1.18);
+      x = Math.cos(a) * rad * rng(0.42, 1.0);
+      y = 0.98 + rnd() * 1.90;
+      z = rng(-0.08, 0.10);
+      bright = rng(0.32, 0.72); size = rng(0.06, 0.19);
+    } else if (q < 0.60) {
+      // Long cascades down both sides
       const t = rnd();
-      x = side * (0.50 + t * 0.65 + rng(-0.18, 0.18));
-      y = 1.05 - t * 3.10;
-      z = rng(-0.40, 0.22);
-    } else if (r < 0.85) {
+      x = side * (0.50 + t * 0.62 + rng(-0.14, 0.14));
+      y = 0.94 - t * 2.85;
+      z = rng(-0.10, 0.05);
+      bright = rng(0.24, 0.62); size = rng(0.05, 0.17);
+    } else if (q < 0.80) {
       // Face-framing front strands
       const t = rnd();
-      x = side * rng(0.28, 0.60);
-      y = 1.10 - t * 1.60;
-      z = rng(0.20, 0.55);
+      x = side * rng(0.24, 0.58);
+      y = 0.90 - t * 1.50;
+      z = rng(0.04, 0.15);
+      bright = rng(0.28, 0.65); size = rng(0.05, 0.15);
     } else {
       // Wispy flyaways
       const a = rnd() * Math.PI * 2;
-      x = Math.cos(a) * rng(0.60, 1.60);
-      y = rng(0.40, 2.80);
-      z = rng(-0.60, 0.20);
+      x = Math.cos(a) * rng(0.55, 1.52);
+      y = rng(0.32, 2.72);
+      z = rng(-0.18, 0.07);
+      bright = rng(0.14, 0.42); size = rng(0.03, 0.12);
     }
-    const [nx, ny, nz] = faceNormal(x, y, z);
-    nrm.push(nx, ny, nz);
-    const bright = rng(0.32, 0.78);
-    const [rc, gc, bc] = particleColor(bright);
-    pos.push(x, y, z); rng2.push(rnd()); col.push(rc, gc, bc);
-    sz.push(rng(0.06, 0.20) * rng(0.65, 1.25)); del.push(rnd() * Math.PI * 2);
+    const ch = rnd() < 0.55 ? 0 : rnd() < 0.55 ? 1 : 2; // purple / pink / blue
+    push(x, y, z, bright, size, ch);
   }
 
-  // ── SHOULDERS
+  // ── SHOULDERS — wide base grounding the portrait
   for (let i = 0; i < C.shoulder; i++) {
-    const x  = rng(-1.88, 1.88);
+    const x  = rng(-1.80, 1.80);
     const ax = Math.abs(x);
-    const y  = -1.06 - ax * 0.085 + rng(-0.22, 0.22);
-    const z  = rng(-0.32, 0.32) - 0.10;
-    const [nx, ny, nz] = faceNormal(x, y, z);
-    nrm.push(nx, ny, nz);
-    const [rc, gc, bc] = particleColor(rng(0.22, 0.56));
-    pos.push(x, y, z); rng2.push(rnd()); col.push(rc, gc, bc);
-    sz.push(rng(0.07, 0.18) * rng(0.65, 1.25)); del.push(rnd() * Math.PI * 2);
+    push(x, -1.04 - ax * 0.068 + rng(-0.17, 0.17), rng(-0.06, 0.06),
+         rng(0.16, 0.46), rng(0.05, 0.15));
   }
 
-  // ── AMBIENT — floating particles around the figure
+  // ── FACE FILL — dim sparse interior (adds atmosphere without clouding features)
+  let filled = 0, guard = 0;
+  while (filled < C.fill && guard < C.fill * 20) {
+    guard++;
+    const x = rng(-0.56, 0.56), y = rng(-0.64, 0.94);
+    // Must be inside face oval
+    if ((x / 0.62) ** 2 + ((y - 0.16) / 0.84) ** 2 > 0.88) continue;
+    // Skip eye zones (let eye rings pop through)
+    if (((x + 0.245) / 0.18) ** 2 + ((y - 0.245) / 0.12) ** 2 < 1.0) continue;
+    if (((x - 0.245) / 0.18) ** 2 + ((y - 0.245) / 0.12) ** 2 < 1.0) continue;
+    push(x, y, rng(-0.01, 0.03), rng(0.06, 0.18), rng(0.03, 0.09));
+    filled++;
+  }
+
+  // ── AMBIENT — dim floating atmosphere around the figure
   for (let i = 0; i < C.ambient; i++) {
-    const x = rng(-3.8, 3.8), y = rng(-3.0, 3.2), z = -(1 + rnd() * 2.5);
-    const [nx, ny, nz] = faceNormal(x, y, z);
-    nrm.push(nx, ny, nz);
-    const [rc, gc, bc] = particleColor(rng(0.14, 0.32));
-    pos.push(x, y, z); rng2.push(rnd()); col.push(rc, gc, bc);
-    sz.push(rng(0.05, 0.14) * rng(0.65, 1.25)); del.push(rnd() * Math.PI * 2);
+    push(rng(-2.4, 2.4), rng(-1.8, 2.7), rng(-1.4, -0.2),
+         rng(0.06, 0.18), rng(0.03, 0.09), autoColor());
   }
 
   return {
