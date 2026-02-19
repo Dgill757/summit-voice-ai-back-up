@@ -60,13 +60,14 @@ const FRAGMENT_SHADER = `
 
     if (dist > 0.5) discard;
 
-    float alpha = (1.0 - smoothstep(0.18, 0.5, dist)) * vAlpha * 0.55;
+    float alpha = (1.0 - smoothstep(0.18, 0.5, dist)) * vAlpha;
     float glow  = 1.0 - dist * 1.55;
 
-    vec3 color = vColor * vBrightness * (0.55 + glow * 0.40);
+    vec3 color = vColor * vBrightness * (0.80 + glow * 0.55);
     color = clamp(color, 0.0, 1.0);
 
-    gl_FragColor = vec4(color, alpha);
+    // Premultiplied alpha — required for NormalBlending to composite cleanly
+    gl_FragColor = vec4(color * alpha, alpha);
   }
 `;
 
@@ -209,7 +210,7 @@ const AvaParticleScene: React.FC<AvaParticleSceneProps> = ({ scrollProgress, cla
   const mouseRef    = useRef({ smoothX: 0, smoothY: 0 });
 
   const particleCount = useMemo(
-    () => (typeof window !== 'undefined' && window.innerWidth < 768 ? 8000 : 12000),
+    () => (typeof window !== 'undefined' && window.innerWidth < 768 ? 8000 : 14000),
     []
   );
 
@@ -254,9 +255,10 @@ const AvaParticleScene: React.FC<AvaParticleSceneProps> = ({ scrollProgress, cla
       vertexShader:   VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER,
       uniforms,
-      transparent: true,
-      depthWrite:  false,
-      blending:    THREE.AdditiveBlending,
+      transparent:       true,
+      depthWrite:        false,
+      blending:          THREE.NormalBlending,
+      premultipliedAlpha: true,
     });
 
     const particles = new THREE.Points(geometry, material);
