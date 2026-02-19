@@ -35,7 +35,7 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
       style={{
         position: 'relative',
         minHeight: '100vh',
-        background: '#050507',
+        background: '#000000',
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
@@ -43,35 +43,7 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
         justifyContent: 'center',
       }}
     >
-      {/* ── Background radial glows ── */}
-      <div style={{
-        position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'hidden',
-      }}>
-        <div style={{
-          position: 'absolute', width: '70vw', height: '70vw', maxWidth: 900, maxHeight: 900,
-          top: '50%', left: '55%', transform: 'translate(-50%,-52%)',
-          background: 'radial-gradient(circle, rgba(124,58,237,0.14) 0%, transparent 65%)',
-          borderRadius: '50%',
-        }} />
-        <div style={{
-          position: 'absolute', width: '50vw', height: '50vw', maxWidth: 600, maxHeight: 600,
-          bottom: '-10%', left: '-5%',
-          background: 'radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 65%)',
-          borderRadius: '50%',
-        }} />
-        <div style={{
-          position: 'absolute', width: '40vw', height: '40vw', maxWidth: 500, maxHeight: 500,
-          top: '5%', right: '0%',
-          background: 'radial-gradient(circle, rgba(244,114,182,0.06) 0%, transparent 65%)',
-          borderRadius: '50%',
-        }} />
-        {/* Subtle grid lines */}
-        <div style={{
-          position: 'absolute', inset: 0, opacity: 0.03,
-          backgroundImage: 'linear-gradient(rgba(255,255,255,0.6) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.6) 1px, transparent 1px)',
-          backgroundSize: '80px 80px',
-        }} />
-      </div>
+      {/* Pure black — no decorative glows, particles are the only light source */}
 
       {/* ── Ava Particle Canvas (full-section overlay, pointer-events none on canvas) ── */}
       <div style={{

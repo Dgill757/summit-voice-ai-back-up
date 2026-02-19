@@ -71,7 +71,7 @@ const Index = () => {
         schema={[getOrganizationSchema(), getFAQSchema(faqs)]}
       />
 
-      <div style={{ background: '#050507', minHeight: '100vh', overflowX: 'hidden' }}>
+      <div style={{ background: '#000000', minHeight: '100vh', overflowX: 'hidden' }}>
         <HeroSection calendarOpen={calendarOpen} setCalendarOpen={setCalendarOpen} />
 
         {/* Widget kept right after hero */}
