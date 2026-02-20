@@ -99,116 +99,88 @@ const FRAG = /* glsl */`
 // Brightness maps directly to particle density — bright = more/larger particles.
 // All color comes from particleColor(); the SVG is grayscale only.
 
+// KEY TECHNIQUE: stroke/outline-based — particles concentrate at feature contours.
+// Dark interior = sparse particles. Bright thick strokes = dense particle rings.
+// Face fill is only 5% opacity so the face oval ring dominates.
 const FACE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 640" width="512" height="640">
   <rect width="512" height="640" fill="black"/>
 
-  <!-- ══ HAIR BACK VOLUME ══ -->
-  <!-- Crown — wide, thick at top -->
-  <ellipse cx="256" cy="50" rx="215" ry="128" fill="rgba(255,255,255,0.88)"/>
-  <!-- Left cascade — long flowing hair down left side -->
-  <path d="M 41 165 C 18 290 14 420 42 568 Q 60 615 78 572 C 58 448 64 318 95 202 Z" fill="rgba(255,255,255,0.82)"/>
-  <!-- Right cascade — mirror -->
-  <path d="M 471 165 C 494 290 498 420 470 568 Q 452 615 434 572 C 454 448 448 318 417 202 Z" fill="rgba(255,255,255,0.82)"/>
-  <!-- Left inner cascade -->
-  <path d="M 75 160 C 62 270 64 380 88 500 C 96 460 100 360 108 250 Z" fill="rgba(255,255,255,0.68)"/>
-  <!-- Right inner cascade -->
-  <path d="M 437 160 C 450 270 448 380 424 500 C 416 460 412 360 404 250 Z" fill="rgba(255,255,255,0.68)"/>
+  <!-- ══ HAIR — stroke-based flowing strands ══ -->
+  <!-- Crown cluster: dense broad strokes fanning from top -->
+  <path d="M 256 20 C 200 60 150 80 110 100" stroke="rgba(255,255,255,0.85)" stroke-width="36" fill="none" stroke-linecap="round"/>
+  <path d="M 256 20 C 290 55 330 72 370 90"  stroke="rgba(255,255,255,0.85)" stroke-width="36" fill="none" stroke-linecap="round"/>
+  <path d="M 256 20 C 256 50 240 80 230 110"  stroke="rgba(255,255,255,0.80)" stroke-width="28" fill="none" stroke-linecap="round"/>
+  <path d="M 256 20 C 256 50 272 80 282 110"  stroke="rgba(255,255,255,0.80)" stroke-width="28" fill="none" stroke-linecap="round"/>
+  <path d="M 256 18 C 180 48 130 65 90 82"   stroke="rgba(255,255,255,0.65)" stroke-width="20" fill="none" stroke-linecap="round"/>
+  <path d="M 256 18 C 332 48 382 65 422 82"  stroke="rgba(255,255,255,0.65)" stroke-width="20" fill="none" stroke-linecap="round"/>
+
+  <!-- Left side cascades: 6 strands flowing to shoulder -->
+  <path d="M 95 185 C 60 300 44 430 62 575"   stroke="rgba(255,255,255,0.88)" stroke-width="34" fill="none" stroke-linecap="round"/>
+  <path d="M 72 215 C 40 335 28 455 46 580"   stroke="rgba(255,255,255,0.74)" stroke-width="22" fill="none" stroke-linecap="round"/>
+  <path d="M 52 248 C 24 365 16 475 36 568"   stroke="rgba(255,255,255,0.58)" stroke-width="15" fill="none" stroke-linecap="round"/>
+  <path d="M 118 168 C 88 285 82 405 99 528"  stroke="rgba(255,255,255,0.62)" stroke-width="19" fill="none" stroke-linecap="round"/>
+  <path d="M 140 155 C 114 268 110 385 126 505" stroke="rgba(255,255,255,0.46)" stroke-width="12" fill="none" stroke-linecap="round"/>
+  <path d="M 160 148 C 138 255 136 365 150 478" stroke="rgba(255,255,255,0.36)" stroke-width="9"  fill="none" stroke-linecap="round"/>
+
+  <!-- Right side cascades: mirror of left -->
+  <path d="M 417 185 C 452 300 468 430 450 575"  stroke="rgba(255,255,255,0.88)" stroke-width="34" fill="none" stroke-linecap="round"/>
+  <path d="M 440 215 C 472 335 484 455 466 580"  stroke="rgba(255,255,255,0.74)" stroke-width="22" fill="none" stroke-linecap="round"/>
+  <path d="M 460 248 C 488 365 496 475 476 568"  stroke="rgba(255,255,255,0.58)" stroke-width="15" fill="none" stroke-linecap="round"/>
+  <path d="M 394 168 C 424 285 430 405 413 528"  stroke="rgba(255,255,255,0.62)" stroke-width="19" fill="none" stroke-linecap="round"/>
+  <path d="M 372 155 C 398 268 402 385 386 505"  stroke="rgba(255,255,255,0.46)" stroke-width="12" fill="none" stroke-linecap="round"/>
+  <path d="M 352 148 C 374 255 376 365 362 478"  stroke="rgba(255,255,255,0.36)" stroke-width="9"  fill="none" stroke-linecap="round"/>
 
   <!-- ══ NECK & SHOULDERS ══ -->
-  <path d="M 218 512 L 208 592 Q 256 640 304 592 L 294 512 Z" fill="rgba(255,255,255,0.62)"/>
-  <ellipse cx="256" cy="636" rx="220" ry="52" fill="rgba(255,255,255,0.48)"/>
-  <!-- Collarbone hints -->
-  <path d="M 148 610 Q 256 595 364 610" stroke="rgba(255,255,255,0.35)" stroke-width="12" fill="none" stroke-linecap="round"/>
+  <line x1="228" y1="512" x2="218" y2="600" stroke="rgba(255,255,255,0.60)" stroke-width="70" stroke-linecap="round"/>
+  <line x1="284" y1="512" x2="294" y2="600" stroke="rgba(255,255,255,0.60)" stroke-width="70" stroke-linecap="round"/>
+  <path d="M 68 632 Q 256 602 444 632" stroke="rgba(255,255,255,0.46)" stroke-width="28" fill="none" stroke-linecap="round"/>
 
   <!-- ══ FACE OVAL ══ -->
-  <ellipse cx="256" cy="308" rx="164" ry="206" fill="rgba(255,255,255,0.74)"/>
-
-  <!-- ══ HAIR FRONT STRANDS — drape over face edges at temples ══ -->
-  <!-- Left temple strand -->
-  <path d="M 92 128 C 86 210 88 310 100 400" stroke="rgba(255,255,255,0.82)" stroke-width="30" fill="none" stroke-linecap="round"/>
-  <!-- Right temple strand -->
-  <path d="M 420 128 C 426 210 424 310 412 400" stroke="rgba(255,255,255,0.82)" stroke-width="30" fill="none" stroke-linecap="round"/>
-  <!-- Left wispy strand (thinner) -->
-  <path d="M 118 112 C 114 190 118 278 136 356" stroke="rgba(255,255,255,0.62)" stroke-width="16" fill="none" stroke-linecap="round"/>
-  <!-- Right wispy strand -->
-  <path d="M 394 112 C 398 190 394 278 376 356" stroke="rgba(255,255,255,0.62)" stroke-width="16" fill="none" stroke-linecap="round"/>
-  <!-- Left face-framing strand (closest to face) -->
-  <path d="M 135 105 C 130 175 135 250 148 322" stroke="rgba(255,255,255,0.48)" stroke-width="10" fill="none" stroke-linecap="round"/>
-  <!-- Right face-framing strand -->
-  <path d="M 377 105 C 382 175 377 250 364 322" stroke="rgba(255,255,255,0.48)" stroke-width="10" fill="none" stroke-linecap="round"/>
+  <!-- Very dim interior fill — just enough for sparse face particles -->
+  <ellipse cx="256" cy="310" rx="160" ry="198" fill="rgba(255,255,255,0.05)"/>
+  <!-- Thick bright ring — bulk of face-outline particles come from here -->
+  <ellipse cx="256" cy="310" rx="160" ry="198" fill="none" stroke="rgba(255,255,255,0.90)" stroke-width="24"/>
 
   <!-- ══ EYEBROWS — high feminine arches ══ -->
-  <path d="M 154 232 Q 194 212 238 226" stroke="rgba(255,255,255,0.94)" stroke-width="11" fill="none" stroke-linecap="round"/>
-  <path d="M 274 226 Q 318 212 358 232" stroke="rgba(255,255,255,0.94)" stroke-width="11" fill="none" stroke-linecap="round"/>
+  <path d="M 150 234 Q 194 212 240 227" stroke="rgba(255,255,255,0.97)" stroke-width="14" fill="none" stroke-linecap="round"/>
+  <path d="M 272 227 Q 318 212 362 234" stroke="rgba(255,255,255,0.97)" stroke-width="14" fill="none" stroke-linecap="round"/>
 
-  <!-- ══ EYES ══ -->
-  <!-- Left eye — upper lash line arc (bright, indicates lashes) -->
-  <path d="M 152 266 Q 196 251 240 266" stroke="rgba(255,255,255,0.90)" stroke-width="8" fill="none" stroke-linecap="round"/>
-  <!-- Left eye white -->
-  <ellipse cx="196" cy="274" rx="42" ry="23" fill="rgba(255,255,255,0.96)"/>
-  <!-- Left iris -->
-  <ellipse cx="196" cy="274" rx="19" ry="19" fill="rgba(55,55,80,0.72)"/>
-  <!-- Left pupil -->
-  <ellipse cx="196" cy="274" rx="10" ry="10" fill="rgba(0,0,0,0.92)"/>
-  <!-- Left eye highlight sparkle -->
-  <ellipse cx="203" cy="267" rx="5" ry="5" fill="rgba(255,255,255,0.98)"/>
-  <ellipse cx="188" cy="280" rx="2" ry="2" fill="rgba(255,255,255,0.70)"/>
-  <!-- Left lower lash (subtle) -->
-  <path d="M 155 282 Q 196 292 237 282" stroke="rgba(255,255,255,0.30)" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <!-- ══ LEFT EYE ══ -->
+  <!-- Upper lash arc (bright arc above the eye) -->
+  <path d="M 148 263 Q 196 246 244 263" stroke="rgba(255,255,255,0.90)" stroke-width="10" fill="none" stroke-linecap="round"/>
+  <!-- Eye ring — the main shape -->
+  <ellipse cx="196" cy="275" rx="46" ry="26" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.98)" stroke-width="15"/>
+  <!-- Iris ring -->
+  <ellipse cx="196" cy="275" rx="20" ry="20" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="7"/>
+  <!-- Pupil void -->
+  <ellipse cx="196" cy="275" rx="9"  ry="9"  fill="rgba(0,0,0,0.96)"/>
+  <!-- Bright highlight -->
+  <circle  cx="203" cy="267" r="6"   fill="white"/>
+  <!-- Lower lash subtle -->
+  <path d="M 152 285 Q 196 298 240 285" stroke="rgba(255,255,255,0.28)" stroke-width="5" fill="none" stroke-linecap="round"/>
 
-  <!-- Right eye — upper lash line arc -->
-  <path d="M 272 266 Q 316 251 360 266" stroke="rgba(255,255,255,0.90)" stroke-width="8" fill="none" stroke-linecap="round"/>
-  <!-- Right eye white -->
-  <ellipse cx="316" cy="274" rx="42" ry="23" fill="rgba(255,255,255,0.96)"/>
-  <!-- Right iris -->
-  <ellipse cx="316" cy="274" rx="19" ry="19" fill="rgba(55,55,80,0.72)"/>
-  <!-- Right pupil -->
-  <ellipse cx="316" cy="274" rx="10" ry="10" fill="rgba(0,0,0,0.92)"/>
-  <!-- Right eye highlight sparkle -->
-  <ellipse cx="323" cy="267" rx="5" ry="5" fill="rgba(255,255,255,0.98)"/>
-  <ellipse cx="308" cy="280" rx="2" ry="2" fill="rgba(255,255,255,0.70)"/>
-  <!-- Right lower lash -->
-  <path d="M 275 282 Q 316 292 357 282" stroke="rgba(255,255,255,0.30)" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <!-- ══ RIGHT EYE ══ -->
+  <path d="M 268 263 Q 316 246 364 263" stroke="rgba(255,255,255,0.90)" stroke-width="10" fill="none" stroke-linecap="round"/>
+  <ellipse cx="316" cy="275" rx="46" ry="26" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.98)" stroke-width="15"/>
+  <ellipse cx="316" cy="275" rx="20" ry="20" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="7"/>
+  <ellipse cx="316" cy="275" rx="9"  ry="9"  fill="rgba(0,0,0,0.96)"/>
+  <circle  cx="323" cy="267" r="6"   fill="white"/>
+  <path d="M 272 285 Q 316 298 360 285" stroke="rgba(255,255,255,0.28)" stroke-width="5" fill="none" stroke-linecap="round"/>
 
   <!-- ══ NOSE ══ -->
-  <!-- Bridge (subtle, delicate) -->
-  <path d="M 253 302 L 250 354" stroke="rgba(255,255,255,0.36)" stroke-width="7" fill="none" stroke-linecap="round"/>
-  <!-- Nose tip -->
-  <ellipse cx="253" cy="360" rx="15" ry="10" fill="rgba(255,255,255,0.46)"/>
-  <!-- Nostrils -->
-  <ellipse cx="237" cy="367" rx="10" ry="7" fill="rgba(255,255,255,0.34)"/>
-  <ellipse cx="271" cy="367" rx="10" ry="7" fill="rgba(255,255,255,0.34)"/>
-  <!-- Nostril shadow separation -->
-  <path d="M 237 361 Q 253 366 271 361" stroke="rgba(0,0,0,0.28)" stroke-width="3" fill="none"/>
+  <path d="M 252 303 L 248 354" stroke="rgba(255,255,255,0.36)" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <path d="M 220 366 Q 254 380 288 366" stroke="rgba(255,255,255,0.44)" stroke-width="9" fill="none" stroke-linecap="round"/>
 
   <!-- ══ LIPS ══ -->
-  <!-- Upper lip — Cupid's bow (slightly brighter center dip) -->
-  <path d="M 206 402 Q 226 392 256 398 Q 286 392 306 402 L 302 408 Q 280 400 256 404 Q 232 400 210 408 Z" fill="rgba(255,255,255,0.88)"/>
-  <!-- Upper lip center peak highlight -->
-  <ellipse cx="256" cy="398" rx="18" ry="5" fill="rgba(255,255,255,0.60)"/>
-  <!-- Lower lip — fuller, rounder -->
-  <path d="M 210 408 Q 256 440 302 408 L 298 416 Q 256 446 214 416 Z" fill="rgba(255,255,255,0.92)"/>
-  <!-- Lip center highlight (lower lip is fullest at center) -->
-  <ellipse cx="256" cy="426" rx="26" ry="8" fill="rgba(255,255,255,0.55)"/>
-  <!-- Lip line separation (subtle shadow) -->
-  <path d="M 212 408 Q 256 414 300 408" stroke="rgba(0,0,0,0.35)" stroke-width="2" fill="none"/>
+  <!-- Upper lip — Cupid's bow -->
+  <path d="M 202 404 Q 228 388 256 396 Q 284 388 310 404" stroke="rgba(255,255,255,0.97)" stroke-width="15" fill="none" stroke-linecap="round"/>
+  <!-- Lower lip — full arc, fullest at centre -->
+  <path d="M 206 410 Q 256 446 306 410" stroke="rgba(255,255,255,0.99)" stroke-width="17" fill="none" stroke-linecap="round"/>
+  <!-- Subtle lip line -->
+  <path d="M 208 408 Q 256 415 304 408" stroke="rgba(255,255,255,0.20)" stroke-width="4"  fill="none"/>
 
-  <!-- ══ CHEEKBONE HIGHLIGHTS ══ -->
-  <ellipse cx="155" cy="334" rx="58" ry="26" fill="rgba(255,255,255,0.16)" transform="rotate(-18,155,334)"/>
-  <ellipse cx="357" cy="334" rx="58" ry="26" fill="rgba(255,255,255,0.16)" transform="rotate(18,357,334)"/>
-
-  <!-- ══ CHIN DEFINITION ══ -->
-  <ellipse cx="256" cy="500" rx="62" ry="18" fill="rgba(255,255,255,0.28)"/>
-
-  <!-- ══ AMBIENT SPARKLE WISPS (loose particles around the silhouette) ══ -->
-  <circle cx="38"  cy="280" r="4" fill="rgba(255,255,255,0.18)"/>
-  <circle cx="28"  cy="350" r="3" fill="rgba(255,255,255,0.14)"/>
-  <circle cx="474" cy="300" r="4" fill="rgba(255,255,255,0.18)"/>
-  <circle cx="484" cy="380" r="3" fill="rgba(255,255,255,0.14)"/>
-  <circle cx="170" cy="44"  r="5" fill="rgba(255,255,255,0.22)"/>
-  <circle cx="342" cy="38"  r="5" fill="rgba(255,255,255,0.22)"/>
-  <circle cx="96"  cy="100" r="4" fill="rgba(255,255,255,0.20)"/>
-  <circle cx="416" cy="100" r="4" fill="rgba(255,255,255,0.20)"/>
+  <!-- ══ CHIN & JAW HINT ══ -->
+  <path d="M 214 500 Q 256 520 298 500" stroke="rgba(255,255,255,0.28)" stroke-width="10" fill="none" stroke-linecap="round"/>
 </svg>`;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
