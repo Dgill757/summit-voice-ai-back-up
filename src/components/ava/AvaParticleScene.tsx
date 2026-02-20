@@ -39,6 +39,7 @@ const VERT = /* glsl */`
   varying vec3  vColor;
   varying float vAlpha;
   varying float vBrightness;
+  varying float vDepth;
 
   void main() {
     vColor = aColor;
@@ -51,22 +52,46 @@ const VERT = /* glsl */`
     pos += aNormal * scatter * 2.8;
     pos.y += scatter * (aRandom - 0.5) * 2.0;
 
-    // 3. Organic float (only when fully morphed in, fades on scroll)
+    // 3. Organic float
     float floatAmt = smoothstep(0.78, 1.0, uMorph) * (1.0 - uScroll);
     pos.y += sin(uTime * 0.40 + aDelay)        * 0.015 * floatAmt;
     pos.x += cos(uTime * 0.32 + aDelay + 1.57) * 0.008 * floatAmt;
 
-    // 4. Alpha: fade in during morph, wave-out during dissolution
+    // 4. Depth varying — front of face (z≈0.55) → 1.0, back (z≈-0.1) → 0.0
+    vDepth = clamp((aFacePos.z + 0.1) / 0.65, 0.0, 1.0);
+
+    // 5. Two-point lighting with Lambert diffuse + specular
+    //    Key light: OPPOSITE the mouse (rim/back-lit drama)
+    vec3 keyLightPos  = vec3(-uMouse.x * 2.6, -uMouse.y * 1.8 + 0.3, 3.2);
+    //    Fill light: same side as mouse (soft secondary bounce)
+    vec3 fillLightPos = vec3( uMouse.x * 1.2,  uMouse.y * 0.8 + 1.6, 1.8);
+
+    // Key light — Lambert + specular
+    vec3  keyDir   = normalize(keyLightPos - pos);
+    float keyLamb  = max(0.0, dot(aNormal, keyDir));
+    float keyFall  = 1.4 / (1.0 + distance(pos, keyLightPos) * 0.36);
+    // Blinn-Phong specular (nose tip / forehead bright cluster)
+    vec3  viewDir  = normalize(vec3(0.0, 0.0, 4.5) - pos);
+    vec3  halfVec  = normalize(keyDir + viewDir);
+    float spec     = pow(max(0.0, dot(aNormal, halfVec)), 16.0) * keyFall;
+    float keyLight = keyLamb * keyFall * 2.2 + spec * 3.2;
+
+    // Fill light — soft Lambert only
+    vec3  fillDir   = normalize(fillLightPos - pos);
+    float fillLamb  = max(0.0, dot(aNormal, fillDir));
+    float fillLight = fillLamb * 0.50;
+
+    // Ambient — thin floor so shadowed areas stay faintly visible
+    float ambient = 0.07;
+
+    vBrightness = ambient + keyLight + fillLight;
+
+    // 6. Alpha: fade in during morph, wave-out during dissolution
     float morphFade    = smoothstep(0.0, 0.42, uMorph);
     float dissolveFade = 1.0 - scatter;
     vAlpha = morphFade * dissolveFade;
 
-    // 5. Mouse-driven specular hotspot
-    vec3  lightPos  = vec3(uMouse.x * 1.8, uMouse.y * 1.2 + 0.6, 2.2);
-    float lightDist = distance(pos, lightPos);
-    vBrightness = 1.0 + (1.0 / (1.0 + lightDist * lightDist * 0.45)) * 0.80;
-
-    // 6. Projection — 350.0 constant gives ~8-20 px particles at camera z=4.2
+    // 7. Projection
     vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
     gl_PointSize = aSize * uPixelRatio * (350.0 / -mvPos.z);
     gl_Position  = projectionMatrix * mvPos;
@@ -77,6 +102,7 @@ const FRAG = /* glsl */`
   varying vec3  vColor;
   varying float vAlpha;
   varying float vBrightness;
+  varying float vDepth;
 
   void main() {
     vec2  coord = gl_PointCoord - 0.5;
@@ -88,7 +114,10 @@ const FRAG = /* glsl */`
     float halo     = exp(-dist * 5.5) * 0.38;
     float strength = core + halo;
 
-    vec3 color = vColor * vBrightness;
+    // Depth tint: front (nose/forehead) → warm white, back (hair) → cooler blue
+    vec3 depthTint = mix(vec3(0.70, 0.88, 1.00), vec3(1.00, 1.00, 1.00), vDepth);
+
+    vec3 color = vColor * vBrightness * depthTint;
     gl_FragColor = vec4(color * strength * vAlpha, strength * vAlpha);
   }
 `;
@@ -244,6 +273,15 @@ interface FaceData {
 
 const W = 512, H = 640;
 
+// Face oval world-space geometry (derived from SVG: cx=256,cy=310, rx=160,ry=198)
+// x = ((px/W) - 0.5) * 3.0  →  rx pixels = 0.938 world units
+// y = -((py/H) - 0.5) * 4.0 →  ry pixels = 1.238 world units
+const FACE_CX    = 0.00;   // face center X
+const FACE_CY    = 0.06;   // face center Y (slightly above mid)
+const FACE_HW    = 0.938;  // face half-width
+const FACE_HH    = 1.238;  // face half-height
+const FACE_DEPTH = 0.55;   // max Z protrusion at nose tip
+
 // ─── Core pixel sampler (shared by photo and SVG paths) ──────────────────────
 
 function sampleImageDataToFaceData(
@@ -279,11 +317,25 @@ function sampleImageDataToFaceData(
     // Map pixel → Three.js world: x[-1.5,1.5], y[+2,-2] (flip Y)
     const x = ((px + jx) / srcW - 0.5) * 3.0;
     const y = -(((py + jy) / srcH) - 0.5) * 4.0;
-    const z = rng(-0.08, 0.18);
+
+    // Spherical Z-depth: model the face as a flattened ellipsoid.
+    // Nose tip (center) protrudes FACE_DEPTH toward camera; edges are at z≈0;
+    // hair/background is slightly negative.
+    const nFX     = (x - FACE_CX) / FACE_HW;
+    const nFY     = (y - FACE_CY) / FACE_HH;
+    const r2      = nFX * nFX + nFY * nFY;
+    const zSphere = Math.sqrt(Math.max(0, 1.0 - Math.min(r2, 1.0)));
+    const z       = zSphere * FACE_DEPTH + rng(-0.012, 0.012);
+
     positions[i*3] = x; positions[i*3+1] = y; positions[i*3+2] = z;
-    const nx = x * 0.35, ny = y * 0.20, nz = 1.0;
-    const nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
-    normals[i*3] = nx/nl; normals[i*3+1] = ny/nl; normals[i*3+2] = nz/nl;
+
+    // Proper ellipsoid surface normals: gradient of x²/a² + y²/b² + z²/c² = 1
+    // = (x/a², y/b², z/c²) → simplified as (nFX/HW, nFY/HH, zSphere/DEPTH)
+    const ell_nx = nFX / FACE_HW;
+    const ell_ny = nFY / FACE_HH;
+    const ell_nz = zSphere / FACE_DEPTH;  // 1.0 at nose, 0 at jaw edge
+    const nl     = Math.sqrt(ell_nx*ell_nx + ell_ny*ell_ny + ell_nz*ell_nz) || 1;
+    normals[i*3] = ell_nx/nl; normals[i*3+1] = ell_ny/nl; normals[i*3+2] = nl > 0 ? ell_nz/nl : 1;
     randoms[i] = rnd();
     const [r, g, gc] = particleColor(b * rng(0.60, 1.00));
     colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
