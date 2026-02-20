@@ -188,22 +188,22 @@ const FACE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 640" 
 const rnd = Math.random;
 const rng = (a: number, b: number) => a + rnd() * (b - a);
 
-/** Multi-hue particle color: purple, pink, blue, white hotspots */
+/** Multi-hue particle color: bright cyan dominant, blue-cyan, white-hot sparkles */
 function particleColor(brightness: number): [number, number, number] {
-  const l   = brightness * rng(0.55, 1.0);
+  const l   = brightness * rng(0.75, 1.0);
   const hue = rnd();
-  if (hue < 0.50) {
-    // Purple/violet — dominant
-    return [l * rng(0.28, 0.50), l * rng(0.05, 0.18), l * rng(0.85, 1.00)];
-  } else if (hue < 0.75) {
-    // Pink/rose
-    return [l * rng(0.78, 1.00), l * rng(0.10, 0.28), l * rng(0.52, 0.80)];
+  if (hue < 0.45) {
+    // Bright cyan — dominant
+    return [l * rng(0.00, 0.12), l * rng(0.72, 1.00), l * rng(0.88, 1.00)];
+  } else if (hue < 0.72) {
+    // Cyan-blue
+    return [l * rng(0.05, 0.22), l * rng(0.50, 0.80), l * rng(0.90, 1.00)];
   } else if (hue < 0.88) {
-    // Electric blue
-    return [l * rng(0.06, 0.22), l * rng(0.38, 0.68), l * rng(0.90, 1.00)];
-  } else {
     // White-hot sparkle
-    return [l * rng(0.82, 1.00), l * rng(0.78, 1.00), l * rng(0.88, 1.00)];
+    return [l * rng(0.75, 1.00), l * rng(0.92, 1.00), l * rng(0.92, 1.00)];
+  } else {
+    // Teal-green edge glow
+    return [l * rng(0.00, 0.10), l * rng(0.85, 1.00), l * rng(0.60, 0.82)];
   }
 }
 
@@ -285,7 +285,7 @@ function sampleImageDataToFaceData(
     const nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
     normals[i*3] = nx/nl; normals[i*3+1] = ny/nl; normals[i*3+2] = nz/nl;
     randoms[i] = rnd();
-    const [r, g, gc] = particleColor(b * rng(0.12, 0.46));
+    const [r, g, gc] = particleColor(b * rng(0.60, 1.00));
     colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
     sizes[i]  = rng(0.04, 0.09) + b * rng(0.00, 0.06);
     delays[i] = rnd() * Math.PI * 2;
