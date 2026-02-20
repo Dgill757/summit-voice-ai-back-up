@@ -166,8 +166,13 @@ function sampleWithMeshSurfaceSampler(
     return (pb?.count ?? 0) > (pa?.count ?? 0) ? m : best;
   }, meshes[0]);
 
-  primary.geometry.computeVertexNormals();
-  const sampler = new MeshSurfaceSampler(primary).build();
+  // Clone geometry and bake the world matrix into it so sampled positions
+  // are in world space (not the mesh's local space which may be offset/rotated)
+  const worldGeo = primary.geometry.clone();
+  worldGeo.applyMatrix4(primary.matrixWorld);
+  worldGeo.computeVertexNormals();
+  const tmpMesh = new THREE.Mesh(worldGeo);
+  const sampler = new MeshSurfaceSampler(tmpMesh).build();
 
   const positions = new Float32Array(count * 3);
   const normals   = new Float32Array(count * 3);
@@ -562,6 +567,10 @@ export default function AvaParticleScene({
         modelUrl,
         (gltf) => {
           try {
+            // Force all scene-graph matrices to be computed — without this,
+            // matrixWorld on each mesh may be identity regardless of transforms
+            gltf.scene.updateMatrixWorld(true);
+
             const meshes: THREE.Mesh[] = [];
             gltf.scene.traverse(c => {
               if ((c as THREE.Mesh).isMesh) meshes.push(c as THREE.Mesh);
@@ -570,18 +579,24 @@ export default function AvaParticleScene({
               setFaceData(makeFeminineGeometry(count));
               return;
             }
+
+            // Bounding box from the scene in world space (correct reference)
             const box  = new THREE.Box3().setFromObject(gltf.scene);
             const size = new THREE.Vector3();
             box.getSize(size);
             const sc   = 2.0 / Math.max(size.x, size.y, size.z);
             const yOff = -box.getCenter(new THREE.Vector3()).y * sc + 0.36;
             setFaceData(sampleWithMeshSurfaceSampler(meshes, count, sc, yOff));
-          } catch {
+          } catch (err) {
+            console.error('[Ava] GLB sampling error:', err);
             setFaceData(makeFeminineGeometry(count));
           }
         },
         undefined,
-        () => setFaceData(makeFeminineGeometry(count)),
+        (err) => {
+          console.error('[Ava] GLB load error:', err);
+          setFaceData(makeFeminineGeometry(count));
+        },
       );
     } else {
       setFaceData(makeFeminineGeometry(count));
