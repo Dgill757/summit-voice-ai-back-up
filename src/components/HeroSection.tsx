@@ -57,7 +57,6 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
         <AvaParticleScene
           scrollProgress={scrollProgress}
           className="w-full h-full"
-          modelUrl="/Ava.glb"
         />
       </div>
 
