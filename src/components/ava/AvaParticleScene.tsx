@@ -153,27 +153,40 @@ interface FaceData {
 }
 
 // ─── GLB sampler ──────────────────────────────────────────────────────────────
+//
+// Direct vertex sampling: collect all world-space vertices from every valid mesh,
+// then randomly pick from that pool.  This is more robust than MeshSurfaceSampler
+// because it handles arbitrary mesh topology and doesn't require proper winding.
 
-function sampleWithMeshSurfaceSampler(
+function sampleFromGLBMeshes(
   meshes: THREE.Mesh[],
   count: number,
   scale: number,
   yOffset: number,
 ): FaceData {
-  const primary = meshes.reduce((best, m) => {
-    const pa = best.geometry.getAttribute('position') as THREE.BufferAttribute;
-    const pb = m.geometry.getAttribute('position') as THREE.BufferAttribute;
-    return (pb?.count ?? 0) > (pa?.count ?? 0) ? m : best;
-  }, meshes[0]);
+  // Collect ALL world-space positions + normals from every mesh
+  const allPos: number[] = [];
+  const allNrm: number[] = [];
 
-  // Clone geometry and bake the world matrix into it so sampled positions
-  // are in world space (not the mesh's local space which may be offset/rotated)
-  const worldGeo = primary.geometry.clone();
-  worldGeo.applyMatrix4(primary.matrixWorld);
-  worldGeo.computeVertexNormals();
-  const tmpMesh = new THREE.Mesh(worldGeo);
-  const sampler = new MeshSurfaceSampler(tmpMesh).build();
+  for (const mesh of meshes) {
+    const geo = mesh.geometry.clone();
+    geo.applyMatrix4(mesh.matrixWorld);   // bake world transform (rotation etc.)
+    geo.computeVertexNormals();
 
+    const pa = geo.getAttribute('position') as THREE.BufferAttribute;
+    const na = geo.getAttribute('normal')   as THREE.BufferAttribute;
+    for (let i = 0; i < pa.count; i++) {
+      allPos.push(pa.getX(i), pa.getY(i), pa.getZ(i));
+      allNrm.push(
+        na ? na.getX(i) : 0,
+        na ? na.getY(i) : 0,
+        na ? na.getZ(i) : 1,
+      );
+    }
+    geo.dispose();
+  }
+
+  const vertCount = allPos.length / 3;
   const positions = new Float32Array(count * 3);
   const normals   = new Float32Array(count * 3);
   const randoms   = new Float32Array(count);
@@ -181,21 +194,20 @@ function sampleWithMeshSurfaceSampler(
   const sizes     = new Float32Array(count);
   const delays    = new Float32Array(count);
 
-  const tmpPos = new THREE.Vector3();
-  const tmpNrm = new THREE.Vector3();
-
   for (let i = 0; i < count; i++) {
-    sampler.sample(tmpPos, tmpNrm);
-    positions[i*3]   = tmpPos.x * scale;
-    positions[i*3+1] = tmpPos.y * scale + yOffset;
-    positions[i*3+2] = tmpPos.z * scale;
-    normals[i*3]   = tmpNrm.x;
-    normals[i*3+1] = tmpNrm.y;
-    normals[i*3+2] = tmpNrm.z;
+    const vi = Math.floor(rnd() * vertCount);
+    positions[i*3]   = allPos[vi*3]   * scale;
+    positions[i*3+1] = allPos[vi*3+1] * scale + yOffset;
+    positions[i*3+2] = allPos[vi*3+2] * scale;
+    normals[i*3]   = allNrm[vi*3];
+    normals[i*3+1] = allNrm[vi*3+1];
+    normals[i*3+2] = allNrm[vi*3+2];
     randoms[i] = rnd();
-    const [r, g, b] = particleColor(rng(0.40, 1.0));
+    // Low brightness (max ~0.45) prevents additive blending from blowing out to white
+    const [r, g, b] = particleColor(rng(0.10, 0.45));
     colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = b;
-    sizes[i]  = rng(0.10, 0.36) * rng(0.65, 1.20);
+    // Small particles — reduces overlap which causes the white blob
+    sizes[i]  = rng(0.05, 0.14) * rng(0.65, 1.10);
     delays[i] = rnd() * Math.PI * 2;
   }
 
@@ -567,27 +579,42 @@ export default function AvaParticleScene({
         modelUrl,
         (gltf) => {
           try {
-            // Force all scene-graph matrices to be computed — without this,
-            // matrixWorld on each mesh may be identity regardless of transforms
+            // Step 1: compute all world matrices (handles rotations exported from Blender etc.)
             gltf.scene.updateMatrixWorld(true);
 
+            // Step 2: collect only real face/hair meshes — skip placeholder objects
+            // (Ava.glb has a stray "Cube" with 14 verts that wrecks the bounding box)
             const meshes: THREE.Mesh[] = [];
             gltf.scene.traverse(c => {
-              if ((c as THREE.Mesh).isMesh) meshes.push(c as THREE.Mesh);
+              const m = c as THREE.Mesh;
+              if (!m.isMesh || !m.geometry) return;
+              const pa = m.geometry.getAttribute('position') as THREE.BufferAttribute;
+              if (!pa || pa.count < 200) return;   // skip degenerate/placeholder meshes
+              meshes.push(m);
             });
             if (!meshes.length) {
               setFaceData(makeFeminineGeometry(count));
               return;
             }
 
-            // Bounding box from the scene in world space (correct reference)
-            const box  = new THREE.Box3().setFromObject(gltf.scene);
+            // Step 3: bounding box from valid meshes only (in world space after matrix bake)
+            // Using setFromObject on the full scene would include the Cube placeholder
+            const box = new THREE.Box3();
+            for (const mesh of meshes) {
+              const geo = mesh.geometry.clone();
+              geo.applyMatrix4(mesh.matrixWorld);
+              const pa  = geo.getAttribute('position') as THREE.BufferAttribute;
+              const tmp = new THREE.Box3().setFromBufferAttribute(pa);
+              box.union(tmp);
+              geo.dispose();
+            }
             const size = new THREE.Vector3();
             box.getSize(size);
+            // Scale so the longest axis = 2.0 units, then group scale ×1.3 = 2.6 on screen
             const sc   = 2.0 / Math.max(size.x, size.y, size.z);
-            // Center the model at world origin so camera always frames it correctly
             const yOff = -box.getCenter(new THREE.Vector3()).y * sc;
-            setFaceData(sampleWithMeshSurfaceSampler(meshes, count, sc, yOff));
+
+            setFaceData(sampleFromGLBMeshes(meshes, count, sc, yOff));
           } catch (err) {
             console.error('[Ava] GLB sampling error:', err);
             setFaceData(makeFeminineGeometry(count));
