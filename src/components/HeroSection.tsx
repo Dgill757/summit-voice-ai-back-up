@@ -43,7 +43,17 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
         justifyContent: 'center',
       }}
     >
-      {/* Pure black — no decorative glows, particles are the only light source */}
+      {/* Ambient glow behind Ava — sits under particles, gives scene a light-source feeling */}
+      <div style={{
+        position: 'absolute',
+        inset: 0,
+        zIndex: 0,
+        background: [
+          'radial-gradient(ellipse 38% 55% at 68% 46%, rgba(0,220,255,0.07) 0%, transparent 70%)',
+          'radial-gradient(ellipse 22% 32% at 66% 44%, rgba(0,200,255,0.05) 0%, transparent 60%)',
+        ].join(', '),
+        pointerEvents: 'none',
+      }} />
 
       {/* ── Ava Particle Canvas (full-section overlay, pointer-events none on canvas) ── */}
       <div style={{
