@@ -504,7 +504,7 @@ function AvaParticles({ scrollProgress, faceData }: ParticlesProps) {
   });
 
   return (
-    <points ref={pointsRef} frustumCulled={false} scale={[1.6, 1.6, 1.6]}>
+    <points ref={pointsRef} frustumCulled={false} scale={[1.3, 1.3, 1.3]}>
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" array={spherePos}           count={count} itemSize={3} />
         <bufferAttribute attach="attributes-aFacePos" array={faceData.positions}  count={count} itemSize={3} />
@@ -585,7 +585,8 @@ export default function AvaParticleScene({
             const size = new THREE.Vector3();
             box.getSize(size);
             const sc   = 2.0 / Math.max(size.x, size.y, size.z);
-            const yOff = -box.getCenter(new THREE.Vector3()).y * sc + 0.36;
+            // Center the model at world origin so camera always frames it correctly
+            const yOff = -box.getCenter(new THREE.Vector3()).y * sc;
             setFaceData(sampleWithMeshSurfaceSampler(meshes, count, sc, yOff));
           } catch (err) {
             console.error('[Ava] GLB sampling error:', err);
@@ -611,7 +612,7 @@ export default function AvaParticleScene({
     <div className={className} style={{ width: '100%', height: '100%' }}>
       <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
         <Canvas
-          camera={{ position: [-0.3, 0.6, 3.6], fov: 60, near: 0.1, far: 100 }}
+          camera={{ position: [0, 0, 4.2], fov: 55, near: 0.1, far: 100 }}
           gl={{
             alpha: true,
             antialias: false,
