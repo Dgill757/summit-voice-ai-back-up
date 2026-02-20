@@ -18,6 +18,8 @@ import React, { useRef, useMemo, useEffect, useState, Component, ReactNode } fro
 import { Canvas, useFrame } from '@react-three/fiber';
 import { AdaptiveDpr } from '@react-three/drei';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import gsap from 'gsap';
 
 // ─── Shaders ──────────────────────────────────────────────────────────────────
@@ -496,6 +498,170 @@ function makeFeminineGeometry(count: number): FaceData {
   };
 }
 
+// ─── GLB mesh sampler ─────────────────────────────────────────────────────────
+//
+// Loads /public/ava-model.glb, walks every triangle in every mesh, and samples
+// `count` random surface points weighted by triangle area. Returns real 3D
+// positions + normals — particles live on the actual mesh surface.
+// Supports Draco-compressed GLBs (from gltfpack / gltf.report optimizer).
+
+function sampleGLTFMesh(gltf: any, count: number): FaceData {
+  // ─ Step 1: Collect all triangles (world-space) ─────────────────────────
+  const posStore:  number[] = [];   // 9 values per tri (ax ay az  bx by bz  cx cy cz)
+  const normStore: number[] = [];   // 9 values per tri (same layout)
+  const areas:     number[] = [];   // 1 value per tri
+
+  const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
+  const _na = new THREE.Vector3(), _nb = new THREE.Vector3(), _nc = new THREE.Vector3();
+  const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3(), _cr = new THREE.Vector3();
+
+  let minX = Infinity,  maxX = -Infinity;
+  let minY = Infinity,  maxY = -Infinity;
+  let minZ = Infinity,  maxZ = -Infinity;
+
+  gltf.scene.traverse((node: any) => {
+    if (!node.isMesh) return;
+    node.updateWorldMatrix(true, false);
+    const mat      = node.matrixWorld as THREE.Matrix4;
+    const geo      = node.geometry   as THREE.BufferGeometry;
+    const posAttr  = geo.getAttribute('position')  as THREE.BufferAttribute | undefined;
+    if (!posAttr) return;
+    const normAttr = geo.getAttribute('normal')    as THREE.BufferAttribute | undefined;
+    const idx      = geo.getIndex();
+    const triCount = idx ? Math.floor(idx.count / 3) : Math.floor(posAttr.count / 3);
+
+    for (let i = 0; i < triCount; i++) {
+      const ia = idx ? idx.getX(i*3)   : i*3;
+      const ib = idx ? idx.getX(i*3+1) : i*3+1;
+      const ic = idx ? idx.getX(i*3+2) : i*3+2;
+
+      _va.fromBufferAttribute(posAttr, ia).applyMatrix4(mat);
+      _vb.fromBufferAttribute(posAttr, ib).applyMatrix4(mat);
+      _vc.fromBufferAttribute(posAttr, ic).applyMatrix4(mat);
+
+      for (const v of [_va, _vb, _vc]) {
+        if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+        if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+        if (v.z < minZ) minZ = v.z; if (v.z > maxZ) maxZ = v.z;
+      }
+
+      if (normAttr) {
+        _na.fromBufferAttribute(normAttr, ia).transformDirection(mat);
+        _nb.fromBufferAttribute(normAttr, ib).transformDirection(mat);
+        _nc.fromBufferAttribute(normAttr, ic).transformDirection(mat);
+      } else {
+        _e1.subVectors(_vb, _va);
+        _e2.subVectors(_vc, _va);
+        _na.crossVectors(_e1, _e2).normalize();
+        _nb.copy(_na); _nc.copy(_na);
+      }
+
+      _e1.subVectors(_vb, _va);
+      _e2.subVectors(_vc, _va);
+      const area = _cr.crossVectors(_e1, _e2).length() * 0.5;
+      if (area < 1e-12) continue;
+
+      posStore.push(
+        _va.x, _va.y, _va.z,
+        _vb.x, _vb.y, _vb.z,
+        _vc.x, _vc.y, _vc.z,
+      );
+      normStore.push(
+        _na.x, _na.y, _na.z,
+        _nb.x, _nb.y, _nb.z,
+        _nc.x, _nc.y, _nc.z,
+      );
+      areas.push(area);
+    }
+  });
+
+  if (areas.length === 0) return makeFeminineGeometry(count);
+
+  // ─ Step 2: Normalize to world space ────────────────────────────────────
+  // Scale so full model height = 4.0 units. Center at origin.
+  const scale   = (maxY - minY) > 0 ? 4.0 / (maxY - minY) : 1.0;
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const centerZ = (minZ + maxZ) / 2;
+
+  // ─ Step 3: Area-weighted CDF ────────────────────────────────────────────
+  const totalArea = areas.reduce((s, a) => s + a, 0);
+  const cdf = new Float32Array(areas.length);
+  let cumSum = 0;
+  for (let i = 0; i < areas.length; i++) {
+    cumSum += areas[i] / totalArea;
+    cdf[i]  = cumSum;
+  }
+
+  function pickTriIdx(): number {
+    const r = rnd();
+    let lo = 0, hi = cdf.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (cdf[mid] < r) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+
+  // ─ Step 4: Sample random surface points ────────────────────────────────
+  const positions = new Float32Array(count * 3);
+  const normals   = new Float32Array(count * 3);
+  const randoms   = new Float32Array(count);
+  const colors    = new Float32Array(count * 3);
+  const sizes     = new Float32Array(count);
+  const delays    = new Float32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const t = pickTriIdx() * 9;   // stride into posStore / normStore
+
+    // Uniform random point via barycentric coords (Osada et al. 2002)
+    let r1 = rnd(), r2 = rnd();
+    if (r1 + r2 > 1) { r1 = 1 - r1; r2 = 1 - r2; }
+    const r3 = 1 - r1 - r2;
+
+    const rawX = r3*posStore[t]   + r1*posStore[t+3] + r2*posStore[t+6];
+    const rawY = r3*posStore[t+1] + r1*posStore[t+4] + r2*posStore[t+7];
+    const rawZ = r3*posStore[t+2] + r1*posStore[t+5] + r2*posStore[t+8];
+
+    const rawNX = r3*normStore[t]   + r1*normStore[t+3] + r2*normStore[t+6];
+    const rawNY = r3*normStore[t+1] + r1*normStore[t+4] + r2*normStore[t+7];
+    const rawNZ = r3*normStore[t+2] + r1*normStore[t+5] + r2*normStore[t+8];
+    const nLen  = Math.sqrt(rawNX*rawNX + rawNY*rawNY + rawNZ*rawNZ) || 1;
+
+    positions[i*3]   = (rawX - centerX) * scale;
+    positions[i*3+1] = (rawY - centerY) * scale;
+    positions[i*3+2] = (rawZ - centerZ) * scale;
+    normals[i*3]     = rawNX / nLen;
+    normals[i*3+1]   = rawNY / nLen;
+    normals[i*3+2]   = rawNZ / nLen;
+
+    randoms[i] = rnd();
+
+    // Brightness from how much the surface faces the camera (+Z)
+    const facing = Math.max(0.08, rawNZ / nLen);
+    const [r, g, gc] = particleColor(facing * rng(0.65, 1.0));
+    colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
+
+    sizes[i]  = rng(0.022, 0.050) + facing * rng(0.008, 0.022);
+    delays[i] = rnd() * Math.PI * 2;
+  }
+
+  return { positions, normals, randoms, colors, sizes, delays };
+}
+
+function loadGLTFFaceData(count: number): Promise<FaceData | null> {
+  return new Promise((resolve) => {
+    const dracoLoader = new DRACOLoader();
+    // Google-hosted decoder supports files compressed by gltfpack / gltf.report
+    dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+    const loader = new GLTFLoader();
+    loader.setDRACOLoader(dracoLoader);
+    loader.load(
+      '/ava-model.glb?' + Math.floor(Date.now() / 60000),
+      (gltf) => { try { resolve(sampleGLTFMesh(gltf, count)); } catch { resolve(null); } },
+      undefined,
+      () => resolve(null),  // file not present — fall through to photo/SVG chain
+    );
+  });
+}
+
 // ─── Inner R3F particles component ───────────────────────────────────────────
 
 interface ParticlesProps {
@@ -622,17 +788,22 @@ export default function AvaParticleScene({
       return;
     }
 
-    // Priority 1: /public/ava-face.png — drop a real portrait here for best results
-    // Priority 2: embedded SVG face (no external files needed)
-    // Priority 3: procedural geometry fallback
-    loadPhotoFaceData(count).then((photoData) => {
-      if (photoData) {
-        setFaceData(photoData);
-      } else {
-        sampleFromSVG(FACE_SVG, count)
-          .then(setFaceData)
-          .catch(() => setFaceData(makeFeminineGeometry(count)));
-      }
+    // Priority 1: /public/ava-model.glb — real 3D mesh (best, particles on actual surface)
+    // Priority 2: /public/ava-face.png  — 2D photo pixel sampling
+    // Priority 3: embedded SVG face     — no external files needed
+    // Priority 4: procedural geometry   — SSR / old browser fallback
+    loadGLTFFaceData(count).then((glbData) => {
+      if (glbData) { setFaceData(glbData); return; }
+
+      loadPhotoFaceData(count).then((photoData) => {
+        if (photoData) {
+          setFaceData(photoData);
+        } else {
+          sampleFromSVG(FACE_SVG, count)
+            .then(setFaceData)
+            .catch(() => setFaceData(makeFeminineGeometry(count)));
+        }
+      });
     });
   }, [count]);
 
