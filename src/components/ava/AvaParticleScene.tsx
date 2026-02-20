@@ -244,83 +244,94 @@ interface FaceData {
 
 const W = 512, H = 640;
 
+// ─── Core pixel sampler (shared by photo and SVG paths) ──────────────────────
+
+function sampleImageDataToFaceData(
+  imageData: ImageData,
+  srcW: number,
+  srcH: number,
+  count: number,
+): FaceData {
+  const data = imageData.data;
+
+  type Pixel = { px: number; py: number; b: number };
+  const pool: Pixel[] = [];
+  for (let i = 0; i < data.length; i += 4) {
+    const b = (data[i] + data[i+1] + data[i+2]) / (3 * 255);
+    if (b < 0.06) continue;                  // skip near-black (background)
+    const px = (i / 4) % srcW;
+    const py = Math.floor((i / 4) / srcW);
+    const weight = Math.ceil(b * 4);         // repeat 1-4× — biases toward bright features
+    for (let w = 0; w < weight; w++) pool.push({ px, py, b });
+  }
+
+  const positions = new Float32Array(count * 3);
+  const normals   = new Float32Array(count * 3);
+  const randoms   = new Float32Array(count);
+  const colors    = new Float32Array(count * 3);
+  const sizes     = new Float32Array(count);
+  const delays    = new Float32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const { px, py, b } = pool[Math.floor(rnd() * pool.length)];
+    const jx = rng(-0.8, 0.8);
+    const jy = rng(-0.8, 0.8);
+    // Map pixel → Three.js world: x[-1.5,1.5], y[+2,-2] (flip Y)
+    const x = ((px + jx) / srcW - 0.5) * 3.0;
+    const y = -(((py + jy) / srcH) - 0.5) * 4.0;
+    const z = rng(-0.08, 0.18);
+    positions[i*3] = x; positions[i*3+1] = y; positions[i*3+2] = z;
+    const nx = x * 0.35, ny = y * 0.20, nz = 1.0;
+    const nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
+    normals[i*3] = nx/nl; normals[i*3+1] = ny/nl; normals[i*3+2] = nz/nl;
+    randoms[i] = rnd();
+    const [r, g, gc] = particleColor(b * rng(0.12, 0.46));
+    colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
+    sizes[i]  = rng(0.04, 0.09) + b * rng(0.00, 0.06);
+    delays[i] = rnd() * Math.PI * 2;
+  }
+  return { positions, normals, randoms, colors, sizes, delays };
+}
+
+// ─── Photo loader — /public/ava-face.png (optional, best quality) ────────────
+//
+// Drop any portrait photo (dark background, face brightly lit) at /public/ava-face.png.
+// The photo is NEVER rendered to screen — only its pixel brightness is used to
+// place particles. After sampling, the pixel data is discarded.
+// Returns null if the file doesn't exist yet.
+
+function loadPhotoFaceData(count: number): Promise<FaceData | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(img, 0, 0, W, H);
+      resolve(sampleImageDataToFaceData(ctx.getImageData(0, 0, W, H), W, H, count));
+    };
+    img.onerror = () => resolve(null);  // file not present — fall through to SVG
+    // Cache-bust so hot-reload picks up the file immediately after you drop it in
+    img.src = '/ava-face.png?' + Math.floor(Date.now() / 60000);
+  });
+}
+
+// ─── SVG sampler ─────────────────────────────────────────────────────────────
+
 async function sampleFromSVG(svgString: string, count: number): Promise<FaceData> {
   return new Promise((resolve) => {
     const blob = new Blob([svgString], { type: 'image/svg+xml' });
     const url  = URL.createObjectURL(blob);
     const img  = new Image();
-
     img.onload = () => {
       const canvas = document.createElement('canvas');
-      canvas.width  = W;
-      canvas.height = H;
+      canvas.width = W; canvas.height = H;
       const ctx = canvas.getContext('2d')!;
       ctx.drawImage(img, 0, 0, W, H);
       URL.revokeObjectURL(url);
-
-      const data = ctx.getImageData(0, 0, W, H).data;
-
-      // Build weighted pool: each bright pixel added 1–4 times based on brightness
-      // This biases sampling toward brighter (more important) features
-      type Pixel = { px: number; py: number; b: number };
-      const pool: Pixel[] = [];
-      for (let i = 0; i < data.length; i += 4) {
-        const b = (data[i] + data[i+1] + data[i+2]) / (3 * 255);
-        if (b < 0.06) continue; // skip near-black pixels
-        const px = (i / 4) % W;
-        const py = Math.floor((i / 4) / W);
-        const weight = Math.ceil(b * 4); // 1-4 based on brightness
-        for (let w = 0; w < weight; w++) pool.push({ px, py, b });
-      }
-
-      const positions = new Float32Array(count * 3);
-      const normals   = new Float32Array(count * 3);
-      const randoms   = new Float32Array(count);
-      const colors    = new Float32Array(count * 3);
-      const sizes     = new Float32Array(count);
-      const delays    = new Float32Array(count);
-
-      for (let i = 0; i < count; i++) {
-        const { px, py, b } = pool[Math.floor(rnd() * pool.length)];
-
-        // Add sub-pixel jitter so particles don't stack on a grid
-        const jx = rng(-0.8, 0.8);
-        const jy = rng(-0.8, 0.8);
-
-        const x = ((px + jx) / W - 0.5) * 3.0;
-        const y = -(((py + jy) / H) - 0.5) * 4.0;
-        const z = rng(-0.08, 0.18);
-
-        positions[i*3]   = x;
-        positions[i*3+1] = y;
-        positions[i*3+2] = z;
-
-        // Normals face outward from face center (for scroll dissolution effect)
-        const nx = x * 0.35, ny = y * 0.20, nz = 1.0;
-        const nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
-        normals[i*3]   = nx/nl;
-        normals[i*3+1] = ny/nl;
-        normals[i*3+2] = nz/nl;
-
-        randoms[i] = rnd();
-
-        // Brightness drives particle intensity — but cap to prevent additive blowout
-        const [r, g, gc] = particleColor(b * rng(0.12, 0.46));
-        colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
-
-        // Sizes: brighter pixels → slightly larger particles
-        sizes[i]  = rng(0.04, 0.09) + b * rng(0.00, 0.06);
-        delays[i] = rnd() * Math.PI * 2;
-      }
-
-      resolve({ positions, normals, randoms, colors, sizes, delays });
+      resolve(sampleImageDataToFaceData(ctx.getImageData(0, 0, W, H), W, H, count));
     };
-
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve(makeFeminineGeometry(count));
-    };
-
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(makeFeminineGeometry(count)); };
     img.src = url;
   });
 }
@@ -576,16 +587,25 @@ export default function AvaParticleScene({
   useEffect(() => {
     const canUseCanvas = typeof document !== 'undefined'
       && typeof Blob !== 'undefined'
-      && typeof URL !== 'undefined'
-      && typeof URL.createObjectURL === 'function';
+      && typeof URL?.createObjectURL === 'function';
 
-    if (canUseCanvas) {
-      sampleFromSVG(FACE_SVG, count)
-        .then(setFaceData)
-        .catch(() => setFaceData(makeFeminineGeometry(count)));
-    } else {
+    if (!canUseCanvas) {
       setFaceData(makeFeminineGeometry(count));
+      return;
     }
+
+    // Priority 1: /public/ava-face.png — drop a real portrait here for best results
+    // Priority 2: embedded SVG face (no external files needed)
+    // Priority 3: procedural geometry fallback
+    loadPhotoFaceData(count).then((photoData) => {
+      if (photoData) {
+        setFaceData(photoData);
+      } else {
+        sampleFromSVG(FACE_SVG, count)
+          .then(setFaceData)
+          .catch(() => setFaceData(makeFeminineGeometry(count)));
+      }
+    });
   }, [count]);
 
   if (!faceData) {
