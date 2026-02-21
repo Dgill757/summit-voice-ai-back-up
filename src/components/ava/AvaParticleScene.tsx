@@ -72,7 +72,7 @@ const VERT = /* glsl */`
 
     // 6. Projection
     vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
-    gl_PointSize = aSize * uPixelRatio * (350.0 / -mvPos.z);
+    gl_PointSize = aSize * uPixelRatio * (560.0 / -mvPos.z);
     gl_Position  = projectionMatrix * mvPos;
   }
 `;
@@ -87,12 +87,21 @@ const FRAG = /* glsl */`
     float dist  = length(coord);
     if (dist > 0.5) discard;
 
-    // Crisp core + soft outer halo (two-layer glow)
-    float core     = pow(max(0.0, 1.0 - dist * 2.6), 2.0);
-    float halo     = exp(-dist * 5.5) * 0.38;
-    float strength = core + halo;
+    // Three-layer glow — this is the visual signature of high-end particle portraits:
+    //   Core:  tight bright centre
+    //   Mid:   wider coloured halo (the brand cyan radiates outward)
+    //   Outer: very wide soft spread (creates bloom where particles cluster)
+    float core      = pow(max(0.0, 1.0 - dist * 3.0), 2.5);
+    float midHalo   = exp(-dist * 4.0) * 0.85;
+    float outerGlow = exp(-dist * 1.8) * 0.40;
+    float strength  = core + midHalo + outerGlow;
 
-    vec3 color = vColor * vBrightness;
+    // White-hot inner core: very centre → near-white, outer → brand colour.
+    // This is the "energy" look — every particle feels lit from inside.
+    float whiteness = pow(max(0.0, 1.0 - dist * 9.0), 1.8);
+    vec3  hotColor  = mix(vColor, vec3(0.85, 1.0, 1.0), whiteness * 0.72);
+
+    vec3 color = hotColor * vBrightness;
     gl_FragColor = vec4(color * strength * vAlpha, strength * vAlpha);
   }
 `;
@@ -317,7 +326,7 @@ function sampleImageDataToFaceData(
     randoms[i] = rnd();
     const [r, g, gc] = particleColor(b * rng(0.60, 1.00));
     colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
-    sizes[i]  = rng(0.04, 0.09) + b * rng(0.00, 0.06);
+    sizes[i]  = rng(0.05, 0.12) + b * rng(0.01, 0.08);
     delays[i] = rnd() * Math.PI * 2;
   }
   return { positions, normals, randoms, colors, sizes, delays };
