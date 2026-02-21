@@ -1,893 +1,13 @@
 /**
- * AvaParticleScene — Premium Three.js particle face effect
+ * AvaPhoto — Ava portrait with a mouse-tracking backlight.
  *
- * Technique: SVG portrait → canvas getImageData → bright pixels become particles.
- * This is the same image-based approach used by Epiminds and similar high-end
- * particle face demos. The face SVG is embedded directly — no external files needed.
- *
- * Pipeline:
- *  1. Render embedded face SVG to an off-screen canvas
- *  2. getImageData() → collect all pixels with brightness > threshold
- *  3. Sample `count` particles from those pixels (weighted by brightness)
- *  4. Map pixel (x,y) → Three.js world coords, add tiny Z noise
- *  5. Sphere → face morph via GSAP-driven uMorph
- *  6. AdditiveBlending glow + mouse parallax + scroll dissolution
+ * The photo has a pure-black background. mix-blend-mode:screen makes
+ * black = transparent so Ava floats on the dark hero without a box.
+ * A cyan radial gradient sits behind her and slowly follows the cursor,
+ * shifting the light direction and throwing contrast across her face.
  */
 
-import React, { useRef, useMemo, useEffect, useState, Component, ReactNode } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { AdaptiveDpr } from '@react-three/drei';
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
-import gsap from 'gsap';
-
-// ─── Shaders ──────────────────────────────────────────────────────────────────
-
-const VERT = /* glsl */`
-  attribute vec3  aFacePos;
-  attribute vec3  aNormal;
-  attribute float aRandom;
-  attribute float aSize;
-  attribute vec3  aColor;
-  attribute float aDelay;
-
-  uniform float uTime;
-  uniform float uMorph;
-  uniform float uScroll;
-  uniform vec2  uMouse;
-  uniform float uPixelRatio;
-
-  varying vec3  vColor;
-  varying float vAlpha;
-  varying float vBrightness;
-
-  void main() {
-    vColor = aColor;
-
-    // 1. Sphere → face morph
-    vec3 pos = mix(position, aFacePos, uMorph);
-
-    // 2. Staggered normal-based dissolution on scroll
-    float scatter = smoothstep(aRandom - 0.12, aRandom + 0.02, uScroll * uMorph);
-    pos += aNormal * scatter * 2.8;
-    pos.y += scatter * (aRandom - 0.5) * 2.0;
-
-    // 3. Organic float
-    float floatAmt = smoothstep(0.78, 1.0, uMorph) * (1.0 - uScroll);
-    pos.y += sin(uTime * 0.40 + aDelay)        * 0.015 * floatAmt;
-    pos.x += cos(uTime * 0.32 + aDelay + 1.57) * 0.008 * floatAmt;
-
-    // 4. Alpha: fade in during morph, wave-out during dissolution
-    float morphFade    = smoothstep(0.0, 0.42, uMorph);
-    float dissolveFade = 1.0 - scatter;
-    vAlpha = morphFade * dissolveFade;
-
-    // 5. Mouse proximity glow — the depth layers make this look 3D via parallax.
-    //    Near particles (high aFacePos.z) catch slightly more glow.
-    vec3  glowPos  = vec3(uMouse.x * 1.8, uMouse.y * 1.2 + 0.6, 2.2);
-    float glowDist = distance(pos, glowPos);
-    float depthBoost = 1.0 + clamp(aFacePos.z * 0.5, 0.0, 0.5);
-    vBrightness = depthBoost * (1.0 + (1.0 / (1.0 + glowDist * glowDist * 0.45)) * 0.90);
-
-    // 6. Projection
-    vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
-    gl_PointSize = aSize * uPixelRatio * (560.0 / -mvPos.z);
-    gl_Position  = projectionMatrix * mvPos;
-  }
-`;
-
-const FRAG = /* glsl */`
-  varying vec3  vColor;
-  varying float vAlpha;
-  varying float vBrightness;
-
-  void main() {
-    vec2  coord = gl_PointCoord - 0.5;
-    float dist  = length(coord);
-    if (dist > 0.5) discard;
-
-    // Three-layer glow — this is the visual signature of high-end particle portraits:
-    //   Core:  tight bright centre
-    //   Mid:   wider coloured halo (the brand cyan radiates outward)
-    //   Outer: very wide soft spread (creates bloom where particles cluster)
-    float core      = pow(max(0.0, 1.0 - dist * 3.0), 2.5);
-    float midHalo   = exp(-dist * 4.0) * 0.85;
-    float outerGlow = exp(-dist * 1.8) * 0.40;
-    float strength  = core + midHalo + outerGlow;
-
-    // White-hot inner core: very centre → near-white, outer → brand colour.
-    // This is the "energy" look — every particle feels lit from inside.
-    float whiteness = pow(max(0.0, 1.0 - dist * 9.0), 1.8);
-    vec3  hotColor  = mix(vColor, vec3(0.85, 1.0, 1.0), whiteness * 0.72);
-
-    vec3 color = hotColor * vBrightness;
-    gl_FragColor = vec4(color * strength * vAlpha, strength * vAlpha);
-  }
-`;
-
-// ─── Embedded face SVG ────────────────────────────────────────────────────────
-//
-// A detailed feminine portrait rendered at 512×640 in grayscale (white on black).
-// Brightness maps directly to particle density — bright = more/larger particles.
-// All color comes from particleColor(); the SVG is grayscale only.
-
-// KEY TECHNIQUE: stroke/outline-based — particles concentrate at feature contours.
-// Dark interior = sparse particles. Bright thick strokes = dense particle rings.
-// Face fill is only 5% opacity so the face oval ring dominates.
-const FACE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 640" width="512" height="640">
-  <rect width="512" height="640" fill="black"/>
-
-  <!-- ══ HAIR — stroke-based flowing strands ══ -->
-  <!-- Crown cluster: dense broad strokes fanning from top -->
-  <path d="M 256 20 C 200 60 150 80 110 100" stroke="rgba(255,255,255,0.85)" stroke-width="36" fill="none" stroke-linecap="round"/>
-  <path d="M 256 20 C 290 55 330 72 370 90"  stroke="rgba(255,255,255,0.85)" stroke-width="36" fill="none" stroke-linecap="round"/>
-  <path d="M 256 20 C 256 50 240 80 230 110"  stroke="rgba(255,255,255,0.80)" stroke-width="28" fill="none" stroke-linecap="round"/>
-  <path d="M 256 20 C 256 50 272 80 282 110"  stroke="rgba(255,255,255,0.80)" stroke-width="28" fill="none" stroke-linecap="round"/>
-  <path d="M 256 18 C 180 48 130 65 90 82"   stroke="rgba(255,255,255,0.65)" stroke-width="20" fill="none" stroke-linecap="round"/>
-  <path d="M 256 18 C 332 48 382 65 422 82"  stroke="rgba(255,255,255,0.65)" stroke-width="20" fill="none" stroke-linecap="round"/>
-
-  <!-- Left side cascades: 6 strands flowing to shoulder -->
-  <path d="M 95 185 C 60 300 44 430 62 575"   stroke="rgba(255,255,255,0.88)" stroke-width="34" fill="none" stroke-linecap="round"/>
-  <path d="M 72 215 C 40 335 28 455 46 580"   stroke="rgba(255,255,255,0.74)" stroke-width="22" fill="none" stroke-linecap="round"/>
-  <path d="M 52 248 C 24 365 16 475 36 568"   stroke="rgba(255,255,255,0.58)" stroke-width="15" fill="none" stroke-linecap="round"/>
-  <path d="M 118 168 C 88 285 82 405 99 528"  stroke="rgba(255,255,255,0.62)" stroke-width="19" fill="none" stroke-linecap="round"/>
-  <path d="M 140 155 C 114 268 110 385 126 505" stroke="rgba(255,255,255,0.46)" stroke-width="12" fill="none" stroke-linecap="round"/>
-  <path d="M 160 148 C 138 255 136 365 150 478" stroke="rgba(255,255,255,0.36)" stroke-width="9"  fill="none" stroke-linecap="round"/>
-
-  <!-- Right side cascades: mirror of left -->
-  <path d="M 417 185 C 452 300 468 430 450 575"  stroke="rgba(255,255,255,0.88)" stroke-width="34" fill="none" stroke-linecap="round"/>
-  <path d="M 440 215 C 472 335 484 455 466 580"  stroke="rgba(255,255,255,0.74)" stroke-width="22" fill="none" stroke-linecap="round"/>
-  <path d="M 460 248 C 488 365 496 475 476 568"  stroke="rgba(255,255,255,0.58)" stroke-width="15" fill="none" stroke-linecap="round"/>
-  <path d="M 394 168 C 424 285 430 405 413 528"  stroke="rgba(255,255,255,0.62)" stroke-width="19" fill="none" stroke-linecap="round"/>
-  <path d="M 372 155 C 398 268 402 385 386 505"  stroke="rgba(255,255,255,0.46)" stroke-width="12" fill="none" stroke-linecap="round"/>
-  <path d="M 352 148 C 374 255 376 365 362 478"  stroke="rgba(255,255,255,0.36)" stroke-width="9"  fill="none" stroke-linecap="round"/>
-
-  <!-- ══ NECK & SHOULDERS ══ -->
-  <line x1="228" y1="512" x2="218" y2="600" stroke="rgba(255,255,255,0.60)" stroke-width="70" stroke-linecap="round"/>
-  <line x1="284" y1="512" x2="294" y2="600" stroke="rgba(255,255,255,0.60)" stroke-width="70" stroke-linecap="round"/>
-  <path d="M 68 632 Q 256 602 444 632" stroke="rgba(255,255,255,0.46)" stroke-width="28" fill="none" stroke-linecap="round"/>
-
-  <!-- ══ FACE OVAL ══ -->
-  <!-- Very dim interior fill — just enough for sparse face particles -->
-  <ellipse cx="256" cy="310" rx="160" ry="198" fill="rgba(255,255,255,0.05)"/>
-  <!-- Thick bright ring — bulk of face-outline particles come from here -->
-  <ellipse cx="256" cy="310" rx="160" ry="198" fill="none" stroke="rgba(255,255,255,0.90)" stroke-width="24"/>
-
-  <!-- ══ EYEBROWS — high feminine arches ══ -->
-  <path d="M 150 234 Q 194 212 240 227" stroke="rgba(255,255,255,0.97)" stroke-width="14" fill="none" stroke-linecap="round"/>
-  <path d="M 272 227 Q 318 212 362 234" stroke="rgba(255,255,255,0.97)" stroke-width="14" fill="none" stroke-linecap="round"/>
-
-  <!-- ══ LEFT EYE ══ -->
-  <!-- Upper lash arc (bright arc above the eye) -->
-  <path d="M 148 263 Q 196 246 244 263" stroke="rgba(255,255,255,0.90)" stroke-width="10" fill="none" stroke-linecap="round"/>
-  <!-- Eye ring — the main shape -->
-  <ellipse cx="196" cy="275" rx="46" ry="26" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.98)" stroke-width="15"/>
-  <!-- Iris ring -->
-  <ellipse cx="196" cy="275" rx="20" ry="20" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="7"/>
-  <!-- Pupil void -->
-  <ellipse cx="196" cy="275" rx="9"  ry="9"  fill="rgba(0,0,0,0.96)"/>
-  <!-- Bright highlight -->
-  <circle  cx="203" cy="267" r="6"   fill="white"/>
-  <!-- Lower lash subtle -->
-  <path d="M 152 285 Q 196 298 240 285" stroke="rgba(255,255,255,0.28)" stroke-width="5" fill="none" stroke-linecap="round"/>
-
-  <!-- ══ RIGHT EYE ══ -->
-  <path d="M 268 263 Q 316 246 364 263" stroke="rgba(255,255,255,0.90)" stroke-width="10" fill="none" stroke-linecap="round"/>
-  <ellipse cx="316" cy="275" rx="46" ry="26" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.98)" stroke-width="15"/>
-  <ellipse cx="316" cy="275" rx="20" ry="20" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="7"/>
-  <ellipse cx="316" cy="275" rx="9"  ry="9"  fill="rgba(0,0,0,0.96)"/>
-  <circle  cx="323" cy="267" r="6"   fill="white"/>
-  <path d="M 272 285 Q 316 298 360 285" stroke="rgba(255,255,255,0.28)" stroke-width="5" fill="none" stroke-linecap="round"/>
-
-  <!-- ══ NOSE ══ -->
-  <path d="M 252 303 L 248 354" stroke="rgba(255,255,255,0.36)" stroke-width="8" fill="none" stroke-linecap="round"/>
-  <path d="M 220 366 Q 254 380 288 366" stroke="rgba(255,255,255,0.44)" stroke-width="9" fill="none" stroke-linecap="round"/>
-
-  <!-- ══ LIPS ══ -->
-  <!-- Upper lip — Cupid's bow -->
-  <path d="M 202 404 Q 228 388 256 396 Q 284 388 310 404" stroke="rgba(255,255,255,0.97)" stroke-width="15" fill="none" stroke-linecap="round"/>
-  <!-- Lower lip — full arc, fullest at centre -->
-  <path d="M 206 410 Q 256 446 306 410" stroke="rgba(255,255,255,0.99)" stroke-width="17" fill="none" stroke-linecap="round"/>
-  <!-- Subtle lip line -->
-  <path d="M 208 408 Q 256 415 304 408" stroke="rgba(255,255,255,0.20)" stroke-width="4"  fill="none"/>
-
-  <!-- ══ CHIN & JAW HINT ══ -->
-  <path d="M 214 500 Q 256 520 298 500" stroke="rgba(255,255,255,0.28)" stroke-width="10" fill="none" stroke-linecap="round"/>
-</svg>`;
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const rnd = Math.random;
-const rng = (a: number, b: number) => a + rnd() * (b - a);
-
-/** Multi-hue particle color: bright cyan dominant, blue-cyan, white-hot sparkles */
-function particleColor(brightness: number): [number, number, number] {
-  const l   = brightness * rng(0.75, 1.0);
-  const hue = rnd();
-  if (hue < 0.45) {
-    // Bright cyan — dominant
-    return [l * rng(0.00, 0.12), l * rng(0.72, 1.00), l * rng(0.88, 1.00)];
-  } else if (hue < 0.72) {
-    // Cyan-blue
-    return [l * rng(0.05, 0.22), l * rng(0.50, 0.80), l * rng(0.90, 1.00)];
-  } else if (hue < 0.88) {
-    // White-hot sparkle
-    return [l * rng(0.75, 1.00), l * rng(0.92, 1.00), l * rng(0.92, 1.00)];
-  } else {
-    // Teal-green edge glow
-    return [l * rng(0.00, 0.10), l * rng(0.85, 1.00), l * rng(0.60, 0.82)];
-  }
-}
-
-// ─── Sphere positions (morph start) ───────────────────────────────────────────
-
-function makeSpherePositions(count: number): Float32Array {
-  const arr = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const phi   = Math.acos(1 - 2 * rnd());
-    const theta = rnd() * Math.PI * 2;
-    const r     = 1.62 * rng(0.88, 1.12);
-    arr[i*3]   = r * Math.sin(phi) * Math.cos(theta);
-    arr[i*3+1] = r * Math.cos(phi);
-    arr[i*3+2] = r * Math.sin(phi) * Math.sin(theta);
-  }
-  return arr;
-}
-
-// ─── Face geometry data type ──────────────────────────────────────────────────
-
-interface FaceData {
-  positions: Float32Array;
-  normals:   Float32Array;
-  randoms:   Float32Array;
-  colors:    Float32Array;
-  sizes:     Float32Array;
-  delays:    Float32Array;
-}
-
-// ─── Image-based sampler ──────────────────────────────────────────────────────
-//
-// Renders the SVG to an off-screen canvas, reads pixel brightness, and
-// places particles at bright pixel locations.
-// Pixel mapping (SVG canvas 512×640 → Three.js world space):
-//   x: px∈[0,512] → [-1.5, +1.5]   (face width = 3.0 units)
-//   y: py∈[0,640] → [+2.0, -2.0]   (face height = 4.0 units, Y flipped)
-//   z: tiny noise ∈[-0.08, +0.18]   (depth gives parallax)
-
-const W = 512, H = 640;
-
-// Face center (for outward normal direction only)
-const FACE_CX = 0.00;
-const FACE_CY = 0.06;
-
-// ─── Core pixel sampler (shared by photo and SVG paths) ──────────────────────
-
-function sampleImageDataToFaceData(
-  imageData: ImageData,
-  srcW: number,
-  srcH: number,
-  count: number,
-): FaceData {
-  const data = imageData.data;
-
-  type Pixel = { px: number; py: number; b: number };
-  const pool: Pixel[] = [];
-  for (let i = 0; i < data.length; i += 4) {
-    const b = (data[i] + data[i+1] + data[i+2]) / (3 * 255);
-    if (b < 0.06) continue;                  // skip near-black (background)
-    const px = (i / 4) % srcW;
-    const py = Math.floor((i / 4) / srcW);
-    const weight = Math.ceil(b * 4);         // repeat 1-4× — biases toward bright features
-    for (let w = 0; w < weight; w++) pool.push({ px, py, b });
-  }
-
-  const positions = new Float32Array(count * 3);
-  const normals   = new Float32Array(count * 3);
-  const randoms   = new Float32Array(count);
-  const colors    = new Float32Array(count * 3);
-  const sizes     = new Float32Array(count);
-  const delays    = new Float32Array(count);
-
-  for (let i = 0; i < count; i++) {
-    const { px, py, b } = pool[Math.floor(rnd() * pool.length)];
-    const jx = rng(-0.8, 0.8);
-    const jy = rng(-0.8, 0.8);
-    // Map pixel → Three.js world: x[-1.5,1.5], y[+2,-2] (flip Y)
-    const x = ((px + jx) / srcW - 0.5) * 3.0;
-    const y = -(((py + jy) / srcH) - 0.5) * 4.0;
-
-    // Anatomical Z-depth — each face region gets a physically motivated Z layer.
-    // This creates real 3D parallax when the user moves the mouse (near particles
-    // rotate faster than far ones), which IS how Epiminds achieves depth.
-    // Uses SVG Y-coordinate (0=top, 1=bottom) to assign layers:
-    const facePY = py / srcH;   // 0.0 (top/hair) → 1.0 (shoulders)
-    const facePX = Math.abs(px / srcW - 0.5) * 2;  // 0=center, 1=edge
-    let zBase: number;
-    if      (facePY < 0.17) zBase = -0.28;          // hair crown — far back
-    else if (facePY < 0.28) zBase = -0.10 - facePX * 0.12; // upper hair / temples
-    else if (facePY < 0.38) zBase =  0.08 + (1 - facePX) * 0.10; // forehead
-    else if (facePY < 0.48) zBase =  0.18 + (1 - facePX) * 0.12; // eyes / brows
-    else if (facePY < 0.60) zBase =  0.30 + (1 - facePX) * 0.14; // nose — most forward
-    else if (facePY < 0.72) zBase =  0.22 + (1 - facePX) * 0.10; // lips / cheeks
-    else if (facePY < 0.82) zBase =  0.08 - facePX * 0.08;        // chin / jaw
-    else                    zBase = -0.18 - facePX * 0.06;         // neck / shoulders
-    const z = zBase + rng(-0.018, 0.018);
-
-    positions[i*3] = x; positions[i*3+1] = y; positions[i*3+2] = z;
-
-    // Simple outward-from-face-center normals — used ONLY for scroll dissolution
-    // scatter direction, not for lighting. Keeps face from looking like a sphere.
-    const nx = (x - FACE_CX) * 0.30;
-    const ny = (y - FACE_CY) * 0.18;
-    const nz = 1.0;
-    const nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
-    normals[i*3] = nx/nl; normals[i*3+1] = ny/nl; normals[i*3+2] = nz/nl;
-    randoms[i] = rnd();
-    const [r, g, gc] = particleColor(b * rng(0.60, 1.00));
-    colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
-    sizes[i]  = rng(0.05, 0.12) + b * rng(0.01, 0.08);
-    delays[i] = rnd() * Math.PI * 2;
-  }
-  return { positions, normals, randoms, colors, sizes, delays };
-}
-
-// ─── GLB Z-depth hybrid helpers ───────────────────────────────────────────────
-//
-// The $10 Ava model gives us real 3D depth from the actual skull/face geometry.
-// Rather than using it for particle *placement* (which scatters particles over
-// the whole mesh), we use it as a Z-depth lookup table: photo pixels place the
-// particles where they look right (face features), and the GLB provides the
-// exact Z coordinate for each position from the real 3D surface.
-
-const GLB_GRID_W = 80;
-const GLB_GRID_H = 100;
-
-// Build a 2D grid mapping (X,Y) world-space coords → Z from the GLB front face.
-function buildGLBZGrid(glbData: FaceData): Float32Array {
-  const count = glbData.positions.length / 3;
-  const gridSum   = new Float32Array(GLB_GRID_W * GLB_GRID_H);
-  const gridCount = new Int32Array(GLB_GRID_W * GLB_GRID_H);
-
-  for (let i = 0; i < count; i++) {
-    const x = glbData.positions[i * 3];
-    const y = glbData.positions[i * 3 + 1];
-    const z = glbData.positions[i * 3 + 2];
-    // Map world X[-1.5,1.5] → [0,gridW],  Y[-2,2] → [0,gridH] (Y is +up in world)
-    const gx = Math.floor((x / 3.0 + 0.5) * GLB_GRID_W);
-    const gy = Math.floor((-y / 4.0 + 0.5) * GLB_GRID_H);
-    if (gx < 0 || gx >= GLB_GRID_W || gy < 0 || gy >= GLB_GRID_H) continue;
-    const gi = gy * GLB_GRID_W + gx;
-    gridSum[gi]   += z;
-    gridCount[gi] += 1;
-  }
-
-  const grid = new Float32Array(GLB_GRID_W * GLB_GRID_H).fill(NaN);
-  for (let i = 0; i < GLB_GRID_W * GLB_GRID_H; i++) {
-    if (gridCount[i] > 0) grid[i] = gridSum[i] / gridCount[i];
-  }
-  return grid;
-}
-
-// Replace the anatomical Z values in photoData with real GLB Z values.
-// Cells with no GLB coverage keep the anatomical fallback.
-function applyGLBDepth(photoData: FaceData, glbData: FaceData): FaceData {
-  const grid    = buildGLBZGrid(glbData);
-  const count   = photoData.positions.length / 3;
-  const positions = new Float32Array(photoData.positions);  // copy so we don't mutate
-
-  for (let i = 0; i < count; i++) {
-    const x = positions[i * 3];
-    const y = positions[i * 3 + 1];
-    const gx = Math.max(0, Math.min(GLB_GRID_W - 1, Math.floor((x / 3.0 + 0.5) * GLB_GRID_W)));
-    const gy = Math.max(0, Math.min(GLB_GRID_H - 1, Math.floor((-y / 4.0 + 0.5) * GLB_GRID_H)));
-    const z  = grid[gy * GLB_GRID_W + gx];
-    if (!isNaN(z)) positions[i * 3 + 2] = z;
-    // else: keep the anatomical Z assigned by sampleImageDataToFaceData
-  }
-  return { ...photoData, positions };
-}
-
-// ─── Photo loader — /public/ava-face.png (optional, best quality) ────────────
-//
-// Drop any portrait photo (dark background, face brightly lit) at /public/ava-face.png.
-// The photo is NEVER rendered to screen — only its pixel brightness is used to
-// place particles. After sampling, the pixel data is discarded.
-// Returns null if the file doesn't exist yet.
-
-function loadPhotoFaceData(count: number): Promise<FaceData | null> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = W; canvas.height = H;
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(img, 0, 0, W, H);
-      resolve(sampleImageDataToFaceData(ctx.getImageData(0, 0, W, H), W, H, count));
-    };
-    img.onerror = () => resolve(null);  // file not present — fall through to SVG
-    // Cache-bust so hot-reload picks up the file immediately after you drop it in
-    img.src = '/ava-face.png?' + Math.floor(Date.now() / 60000);
-  });
-}
-
-// ─── SVG sampler ─────────────────────────────────────────────────────────────
-
-async function sampleFromSVG(svgString: string, count: number): Promise<FaceData> {
-  return new Promise((resolve) => {
-    const blob = new Blob([svgString], { type: 'image/svg+xml' });
-    const url  = URL.createObjectURL(blob);
-    const img  = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = W; canvas.height = H;
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(img, 0, 0, W, H);
-      URL.revokeObjectURL(url);
-      resolve(sampleImageDataToFaceData(ctx.getImageData(0, 0, W, H), W, H, count));
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(makeFeminineGeometry(count)); };
-    img.src = url;
-  });
-}
-
-// ─── Procedural fallback face geometry ────────────────────────────────────────
-//
-// Used only if the canvas/Blob API is unavailable (SSR, old WebView, etc.).
-
-function makeFeminineGeometry(count: number): FaceData {
-  const C = {
-    headRing: Math.floor(count * 0.090),
-    eyeLeft:  Math.floor(count * 0.065),
-    eyeRight: Math.floor(count * 0.065),
-    iris:     Math.floor(count * 0.025),
-    brows:    Math.floor(count * 0.048),
-    nose:     Math.floor(count * 0.038),
-    lipsUp:   Math.floor(count * 0.055),
-    lipsLow:  Math.floor(count * 0.060),
-    cheeks:   Math.floor(count * 0.038),
-    jaw:      Math.floor(count * 0.040),
-    neck:     Math.floor(count * 0.028),
-    hair:     Math.floor(count * 0.255),
-    shoulder: Math.floor(count * 0.065),
-    fill:     Math.floor(count * 0.055),
-    ambient:  Math.floor(count * 0.040),
-  };
-  const used = Object.values(C).reduce((s, v) => s + v, 0);
-  C.hair += count - used;
-
-  const pos: number[] = [], nrm: number[] = [], rng2: number[] = [];
-  const col: number[] = [], sz: number[] = [], del: number[] = [];
-
-  function push(x: number, y: number, z: number, bright: number, size: number, ch = 0) {
-    const l = bright * rng(0.62, 1.0);
-    let r: number, g: number, b: number;
-    if      (ch === 1) { r = l*rng(0.78,1.00); g = l*rng(0.10,0.28); b = l*rng(0.52,0.78); }
-    else if (ch === 2) { r = l*rng(0.06,0.22); g = l*rng(0.38,0.68); b = l*rng(0.90,1.00); }
-    else if (ch === 3) { r = l*rng(0.85,1.00); g = l*rng(0.80,1.00); b = l*rng(0.88,1.00); }
-    else               { r = l*rng(0.28,0.48); g = l*rng(0.05,0.16); b = l*rng(0.85,1.00); }
-    pos.push(x + rng(-0.005,0.005), y + rng(-0.005,0.005), z + rng(-0.004,0.004));
-    nrm.push(0, 0, 1);
-    rng2.push(rnd());
-    col.push(r, g, b);
-    sz.push(size * rng(0.72, 1.28));
-    del.push(rnd() * Math.PI * 2);
-  }
-
-  function autoColor(): number {
-    const h = rnd(); return h < 0.50 ? 0 : h < 0.75 ? 1 : h < 0.88 ? 2 : 3;
-  }
-
-  for (let i = 0; i < C.headRing; i++) {
-    const a = rnd() * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
-    const rx = 0.62 + rng(-0.018, 0.018);
-    const ry = sa > 0 ? 0.88 + rng(-0.018, 0.018) : 0.70 + rng(-0.018, 0.018);
-    push(rx * ca, ry * sa + 0.16, rng(-0.02, 0.02), rng(0.42, 0.78), rng(0.07, 0.17));
-  }
-  for (const { ex, ey } of [{ ex: -0.245, ey: 0.245 }, { ex: 0.245, ey: 0.245 }]) {
-    const n = Math.floor(C.eyeLeft / 2);
-    for (let i = 0; i < n; i++) {
-      const a = rnd() * Math.PI * 2, s = rng(0.88, 1.12);
-      const bright = Math.sin(a) > 0 ? rng(0.80, 1.00) : rng(0.52, 0.78);
-      push(ex + 0.158*s*Math.cos(a), ey + 0.100*s*Math.sin(a), 0.08, bright, rng(0.11, 0.26), rnd() < 0.40 ? 2 : rnd() < 0.50 ? 3 : 0);
-    }
-  }
-  for (const { ex, ey } of [{ ex: -0.245, ey: 0.245 }, { ex: 0.245, ey: 0.245 }]) {
-    const n = Math.floor(C.iris / 2);
-    for (let i = 0; i < n; i++) {
-      const a = rnd() * Math.PI * 2, r2 = rnd() * 0.070;
-      push(ex + r2*Math.cos(a)*1.45, ey + r2*Math.sin(a)*0.90, 0.06, rng(0.22, 0.52), rng(0.05, 0.13), 2);
-    }
-  }
-  for (const ex of [-0.245, 0.245]) {
-    const n = Math.floor(C.brows / 2);
-    for (let i = 0; i < n; i++) {
-      const t = rng(-1, 1), arch = 0.026 * (1 - Math.abs(t));
-      push(ex + t * 0.158, 0.378 + arch, 0.09, rng(0.58, 0.94), rng(0.06, 0.17));
-    }
-  }
-  for (let i = 0; i < C.nose; i++) {
-    const q = rnd();
-    if (q < 0.42) { push(rng(-0.013,0.013), 0.155 - rnd()*0.245, 0.10, rng(0.48,0.82), rng(0.05,0.13)); }
-    else if (q < 0.68) { const a = rnd()*Math.PI*2; push(rnd()*0.032*Math.cos(a), -0.108+rnd()*0.026*Math.sin(a), 0.13, rng(0.52,0.86), rng(0.05,0.13)); }
-    else { const s = rnd()<0.5?-1:1; push(s*(0.064+rnd()*0.024), -0.148+rng(-0.012,0.012), 0.11, rng(0.42,0.78), rng(0.04,0.11)); }
-  }
-  for (let i = 0; i < C.lipsUp; i++) {
-    const t = rng(-1,1), bow = 0.022*Math.max(0, 1-((Math.abs(t)-0.35)/0.65)**2) - 0.005;
-    push(t*0.178, -0.278+bow, 0.11, rng(0.72,1.00), rng(0.09,0.23), 1);
-  }
-  for (let i = 0; i < C.lipsLow; i++) {
-    const t = rng(-1,1); push(t*0.188, -0.358-0.022*(1-t*t), 0.11, rng(0.70,1.00), rng(0.09,0.23), 1);
-  }
-  for (const cx of [-0.355, 0.355]) {
-    const n = Math.floor(C.cheeks / 2);
-    for (let i = 0; i < n; i++) push(cx+rng(-0.105,0.105), 0.052+rng(-0.072,0.072), rng(0.03,0.09), rng(0.28,0.60), rng(0.05,0.15));
-  }
-  for (let i = 0; i < C.jaw; i++) {
-    const t = rng(-1,1), at = Math.abs(t);
-    push(t*0.47*(0.82+at*0.18), -0.50-(1-at*at)*0.22, rng(0,0.05), rng(0.30,0.62), rng(0.06,0.15));
-  }
-  for (let i = 0; i < C.neck; i++) push(rng(-0.112,0.112), -0.72-rnd()*0.40, rng(-0.01,0.05), rng(0.20,0.50), rng(0.04,0.13));
-  for (let i = 0; i < C.hair; i++) {
-    const side = rnd() < 0.5 ? -1 : 1; let x: number, y: number, z: number, bright: number, size: number;
-    const q = rnd();
-    if (q < 0.22) { const a = rnd()*Math.PI*2, rad = rng(0.22,1.18); x = Math.cos(a)*rad*rng(0.42,1.0); y = 0.98+rnd()*1.90; z = rng(-0.08,0.10); bright = rng(0.32,0.72); size = rng(0.06,0.19); }
-    else if (q < 0.60) { const t = rnd(); x = side*(0.50+t*0.62+rng(-0.14,0.14)); y = 0.94-t*2.85; z = rng(-0.10,0.05); bright = rng(0.24,0.62); size = rng(0.05,0.17); }
-    else if (q < 0.80) { x = side*rng(0.24,0.58); y = 0.90-rnd()*1.50; z = rng(0.04,0.15); bright = rng(0.28,0.65); size = rng(0.05,0.15); }
-    else { const a = rnd()*Math.PI*2; x = Math.cos(a)*rng(0.55,1.52); y = rng(0.32,2.72); z = rng(-0.18,0.07); bright = rng(0.14,0.42); size = rng(0.03,0.12); }
-    push(x, y, z, bright, size, rnd()<0.55?0:rnd()<0.55?1:2);
-  }
-  for (let i = 0; i < C.shoulder; i++) {
-    const x = rng(-1.80,1.80), ax = Math.abs(x);
-    push(x, -1.04-ax*0.068+rng(-0.17,0.17), rng(-0.06,0.06), rng(0.16,0.46), rng(0.05,0.15));
-  }
-  let filled = 0, guard = 0;
-  while (filled < C.fill && guard < C.fill * 20) {
-    guard++;
-    const x = rng(-0.56,0.56), y = rng(-0.64,0.94);
-    if ((x/0.62)**2 + ((y-0.16)/0.84)**2 > 0.88) continue;
-    if (((x+0.245)/0.18)**2 + ((y-0.245)/0.12)**2 < 1.0) continue;
-    if (((x-0.245)/0.18)**2 + ((y-0.245)/0.12)**2 < 1.0) continue;
-    push(x, y, rng(-0.01,0.03), rng(0.06,0.18), rng(0.03,0.09));
-    filled++;
-  }
-  for (let i = 0; i < C.ambient; i++) push(rng(-2.4,2.4), rng(-1.8,2.7), rng(-1.4,-0.2), rng(0.06,0.18), rng(0.03,0.09), autoColor());
-
-  return {
-    positions: new Float32Array(pos),
-    normals:   new Float32Array(nrm),
-    randoms:   new Float32Array(rng2),
-    colors:    new Float32Array(col),
-    sizes:     new Float32Array(sz),
-    delays:    new Float32Array(del),
-  };
-}
-
-// ─── GLB mesh sampler ─────────────────────────────────────────────────────────
-//
-// Loads /public/ava-model.glb, walks every triangle in every mesh, and samples
-// `count` random surface points weighted by triangle area. Returns real 3D
-// positions + normals — particles live on the actual mesh surface.
-// Supports Draco-compressed GLBs (from gltfpack / gltf.report optimizer).
-
-function sampleGLTFMesh(gltf: any, count: number): FaceData {
-  // ─ Step 1: Collect all triangles (world-space) ─────────────────────────
-  const posStore:  number[] = [];   // 9 values per tri (ax ay az  bx by bz  cx cy cz)
-  const normStore: number[] = [];   // 9 values per tri (same layout)
-  const areas:     number[] = [];   // 1 value per tri
-
-  const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
-  const _na = new THREE.Vector3(), _nb = new THREE.Vector3(), _nc = new THREE.Vector3();
-  const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3(), _cr = new THREE.Vector3();
-
-  let minX = Infinity,  maxX = -Infinity;
-  let minY = Infinity,  maxY = -Infinity;
-  let minZ = Infinity,  maxZ = -Infinity;
-
-  gltf.scene.traverse((node: any) => {
-    if (!node.isMesh) return;
-    node.updateWorldMatrix(true, false);
-    const mat      = node.matrixWorld as THREE.Matrix4;
-    const geo      = node.geometry   as THREE.BufferGeometry;
-    const posAttr  = geo.getAttribute('position')  as THREE.BufferAttribute | undefined;
-    if (!posAttr) return;
-    const normAttr = geo.getAttribute('normal')    as THREE.BufferAttribute | undefined;
-    const idx      = geo.getIndex();
-    const triCount = idx ? Math.floor(idx.count / 3) : Math.floor(posAttr.count / 3);
-
-    for (let i = 0; i < triCount; i++) {
-      const ia = idx ? idx.getX(i*3)   : i*3;
-      const ib = idx ? idx.getX(i*3+1) : i*3+1;
-      const ic = idx ? idx.getX(i*3+2) : i*3+2;
-
-      _va.fromBufferAttribute(posAttr, ia).applyMatrix4(mat);
-      _vb.fromBufferAttribute(posAttr, ib).applyMatrix4(mat);
-      _vc.fromBufferAttribute(posAttr, ic).applyMatrix4(mat);
-
-      for (const v of [_va, _vb, _vc]) {
-        if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
-        if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
-        if (v.z < minZ) minZ = v.z; if (v.z > maxZ) maxZ = v.z;
-      }
-
-      if (normAttr) {
-        _na.fromBufferAttribute(normAttr, ia).transformDirection(mat);
-        _nb.fromBufferAttribute(normAttr, ib).transformDirection(mat);
-        _nc.fromBufferAttribute(normAttr, ic).transformDirection(mat);
-      } else {
-        _e1.subVectors(_vb, _va);
-        _e2.subVectors(_vc, _va);
-        _na.crossVectors(_e1, _e2).normalize();
-        _nb.copy(_na); _nc.copy(_na);
-      }
-
-      _e1.subVectors(_vb, _va);
-      _e2.subVectors(_vc, _va);
-      const area = _cr.crossVectors(_e1, _e2).length() * 0.5;
-      if (area < 1e-12) continue;
-
-      posStore.push(
-        _va.x, _va.y, _va.z,
-        _vb.x, _vb.y, _vb.z,
-        _vc.x, _vc.y, _vc.z,
-      );
-      normStore.push(
-        _na.x, _na.y, _na.z,
-        _nb.x, _nb.y, _nb.z,
-        _nc.x, _nc.y, _nc.z,
-      );
-      areas.push(area);
-    }
-  });
-
-  if (areas.length === 0) return makeFeminineGeometry(count);
-
-  // ─ Step 2: Robust normalization via percentile Y range ─────────────────
-  // Using raw min/max fails if the model has outlier verts (stray hair strands,
-  // background planes, etc.) that expand the bbox and shrink the scale.
-  // Instead we use the 3rd–97th percentile of triangle-center Y values to
-  // compute a scale that represents where 94% of the geometry actually lives.
-  const triCenterYs: number[] = [];
-  for (let i = 0; i < posStore.length; i += 9) {
-    triCenterYs.push((posStore[i + 1] + posStore[i + 4] + posStore[i + 7]) / 3);
-  }
-  triCenterYs.sort((a, b) => a - b);
-  const n = triCenterYs.length;
-  const p03Y = triCenterYs[Math.max(0, Math.floor(n * 0.03))];
-  const p97Y = triCenterYs[Math.min(n - 1, Math.floor(n * 0.97))];
-  const robustH = p97Y - p03Y;
-
-  const scale   = robustH > 0.001 ? 2.8 / robustH : (maxY - minY) > 0 ? 2.8 / (maxY - minY) : 1.0;
-  const centerX = (minX + maxX) / 2;
-  // Anchor at 40% up from p03 — puts the face/eye region near Y=0 after scaling
-  const centerY = p03Y + robustH * 0.40;
-  const centerZ = (minZ + maxZ) / 2;
-
-  // ─ Step 3: Auto-orient before filtering ────────────────────────────────
-  // Compute average normal Z across ALL triangles to detect if the model
-  // faces -Z (common for Meshy / Tripo exports). Flip BEFORE filtering so
-  // the front-face threshold is applied in the correct direction.
-  const triTotal = areas.length;
-  let rawAvgNZ = 0;
-  for (let ti = 0; ti < triTotal; ti++) {
-    const ns = ti * 9;
-    rawAvgNZ += (normStore[ns+2] + normStore[ns+5] + normStore[ns+8]) / 3;
-  }
-  rawAvgNZ /= triTotal;
-
-  if (rawAvgNZ < 0) {
-    // 180° rotation around Y: negate X and Z for positions + normals
-    for (let j = 0; j < posStore.length; j += 3) {
-      posStore[j]    = -posStore[j];
-      posStore[j+2]  = -posStore[j+2];
-      normStore[j]   = -normStore[j];
-      normStore[j+2] = -normStore[j+2];
-    }
-  }
-
-  // ─ Step 4: Front-face-only CDF ──────────────────────────────────────────
-  // Keep only triangles whose average normal faces the camera (nZ > 0.1).
-  // This drops the back of the skull, inner mouth, and wrapped side geometry
-  // that produced the formless scatter blob — leaving only the visible face.
-  const fwdAreas:   number[] = [];
-  const fwdIndices: number[] = [];  // original triangle index in posStore/normStore
-
-  for (let ti = 0; ti < triTotal; ti++) {
-    const ns = ti * 9;
-    const avgTriNZ = (normStore[ns+2] + normStore[ns+5] + normStore[ns+8]) / 3;
-    if (avgTriNZ > 0.1) {
-      fwdAreas.push(areas[ti]);
-      fwdIndices.push(ti);
-    }
-  }
-
-  if (fwdAreas.length === 0) return makeFeminineGeometry(count);
-
-  const totalArea = fwdAreas.reduce((s, a) => s + a, 0);
-  const cdf = new Float32Array(fwdAreas.length);
-  let cumSum = 0;
-  for (let i = 0; i < fwdAreas.length; i++) {
-    cumSum += fwdAreas[i] / totalArea;
-    cdf[i]  = cumSum;
-  }
-
-  function pickTriIdx(): number {
-    const r = rnd();
-    let lo = 0, hi = cdf.length - 1;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (cdf[mid] < r) lo = mid + 1; else hi = mid; }
-    return fwdIndices[lo];  // return ORIGINAL triangle index into posStore/normStore
-  }
-
-  // ─ Step 4: Sample random surface points ────────────────────────────────
-  const positions = new Float32Array(count * 3);
-  const normals   = new Float32Array(count * 3);
-  const randoms   = new Float32Array(count);
-  const colors    = new Float32Array(count * 3);
-  const sizes     = new Float32Array(count);
-  const delays    = new Float32Array(count);
-
-  for (let i = 0; i < count; i++) {
-    const t = pickTriIdx() * 9;   // stride into posStore / normStore
-
-    // Uniform random point via barycentric coords (Osada et al. 2002)
-    let r1 = rnd(), r2 = rnd();
-    if (r1 + r2 > 1) { r1 = 1 - r1; r2 = 1 - r2; }
-    const r3 = 1 - r1 - r2;
-
-    const rawX = r3*posStore[t]   + r1*posStore[t+3] + r2*posStore[t+6];
-    const rawY = r3*posStore[t+1] + r1*posStore[t+4] + r2*posStore[t+7];
-    const rawZ = r3*posStore[t+2] + r1*posStore[t+5] + r2*posStore[t+8];
-
-    const rawNX = r3*normStore[t]   + r1*normStore[t+3] + r2*normStore[t+6];
-    const rawNY = r3*normStore[t+1] + r1*normStore[t+4] + r2*normStore[t+7];
-    const rawNZ = r3*normStore[t+2] + r1*normStore[t+5] + r2*normStore[t+8];
-    const nLen  = Math.sqrt(rawNX*rawNX + rawNY*rawNY + rawNZ*rawNZ) || 1;
-
-    positions[i*3]   = (rawX - centerX) * scale;
-    positions[i*3+1] = (rawY - centerY) * scale;
-    positions[i*3+2] = (rawZ - centerZ) * scale;
-    normals[i*3]     = rawNX / nLen;
-    normals[i*3+1]   = rawNY / nLen;
-    normals[i*3+2]   = rawNZ / nLen;
-
-    randoms[i] = rnd();
-
-    // Brightness from how much the surface faces the camera (+Z)
-    const facing = Math.max(0.08, rawNZ / nLen);
-    const [r, g, gc] = particleColor(facing * rng(0.65, 1.0));
-    colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
-
-    sizes[i]  = rng(0.035, 0.075) + facing * rng(0.014, 0.032);
-    delays[i] = rnd() * Math.PI * 2;
-  }
-
-  // ─ Step 5: Centroid re-center (safety net) ─────────────────────────────
-  // Even with percentile scaling the sampled centroid may drift. Shift so
-  // the average sampled Y = 0, keeping the face in the camera's view.
-  let centY = 0;
-  for (let i = 0; i < count; i++) centY += positions[i * 3 + 1];
-  centY /= count;
-  for (let i = 0; i < count; i++) positions[i * 3 + 1] -= centY;
-
-  return { positions, normals, randoms, colors, sizes, delays };
-}
-
-function loadGLTFFaceData(count: number): Promise<FaceData | null> {
-  return new Promise((resolve) => {
-    const dracoLoader = new DRACOLoader();
-    dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
-    const loader = new GLTFLoader();
-    loader.setDRACOLoader(dracoLoader);
-    loader.load(
-      '/ava-model.glb?' + Math.floor(Date.now() / 60000),
-      (gltf) => { try { resolve(sampleGLTFMesh(gltf, count)); } catch { resolve(null); } },
-      undefined,
-      () => resolve(null),  // file not present — fall through to photo/SVG
-    );
-  });
-}
-
-// ─── Inner R3F particles component ───────────────────────────────────────────
-
-interface ParticlesProps {
-  scrollProgress: number;
-  faceData: FaceData;
-}
-
-function AvaParticles({ scrollProgress, faceData }: ParticlesProps) {
-  const pointsRef = useRef<THREE.Points>(null!);
-  const mouseRef  = useRef({ x: 0, y: 0, sx: 0, sy: 0 });
-  const count     = faceData.positions.length / 3;
-
-  const spherePos = useMemo(() => makeSpherePositions(count), [count]);
-
-  const uniforms = useMemo(() => ({
-    uTime:       { value: 0 },
-    uMorph:      { value: 0 },
-    uScroll:     { value: 0 },
-    uMouse:      { value: new THREE.Vector2(0, 0) },
-    uPixelRatio: { value: Math.min(
-      typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2.0,
-    ) },
-  }), []);
-
-  // Entrance: GSAP animates sphere → face morph
-  useEffect(() => {
-    gsap.to(uniforms.uMorph, {
-      value: 1, duration: 2.8, delay: 0.35, ease: 'power3.inOut',
-    });
-  }, [uniforms]);
-
-  // Scroll sync
-  useEffect(() => {
-    uniforms.uScroll.value = scrollProgress;
-  }, [scrollProgress, uniforms]);
-
-  // Mouse tracking
-  useEffect(() => {
-    const handle = (e: MouseEvent) => {
-      mouseRef.current.x =  (e.clientX / window.innerWidth)  * 2 - 1;
-      mouseRef.current.y = -((e.clientY / window.innerHeight) * 2 - 1);
-    };
-    window.addEventListener('mousemove', handle);
-    return () => window.removeEventListener('mousemove', handle);
-  }, []);
-
-  // Animation loop
-  useFrame((state) => {
-    uniforms.uTime.value = state.clock.elapsedTime;
-    const m = mouseRef.current;
-    m.sx += (m.x - m.sx) * 0.055;
-    m.sy += (m.y - m.sy) * 0.055;
-    uniforms.uMouse.value.set(m.sx, m.sy);
-
-    if (pointsRef.current) {
-      const p = pointsRef.current;
-      p.rotation.y += (m.sx * 0.28 - p.rotation.y) * 0.055;
-      p.rotation.x += (-m.sy * 0.20 - p.rotation.x) * 0.055;
-    }
-  });
-
-  return (
-    <points ref={pointsRef} frustumCulled={false}>
-      <bufferGeometry>
-        <bufferAttribute attach="attributes-position" array={spherePos}           count={count} itemSize={3} />
-        <bufferAttribute attach="attributes-aFacePos" array={faceData.positions}  count={count} itemSize={3} />
-        <bufferAttribute attach="attributes-aNormal"  array={faceData.normals}    count={count} itemSize={3} />
-        <bufferAttribute attach="attributes-aRandom"  array={faceData.randoms}    count={count} itemSize={1} />
-        <bufferAttribute attach="attributes-aColor"   array={faceData.colors}     count={count} itemSize={3} />
-        <bufferAttribute attach="attributes-aSize"    array={faceData.sizes}      count={count} itemSize={1} />
-        <bufferAttribute attach="attributes-aDelay"   array={faceData.delays}     count={count} itemSize={1} />
-      </bufferGeometry>
-      <shaderMaterial
-        vertexShader={VERT}
-        fragmentShader={FRAG}
-        uniforms={uniforms}
-        transparent
-        depthWrite={false}
-        blending={THREE.AdditiveBlending}
-      />
-    </points>
-  );
-}
-
-// ─── Error boundary ───────────────────────────────────────────────────────────
-
-class CanvasErrorBoundary extends Component<
-  { children: ReactNode; fallback: ReactNode },
-  { hasError: boolean }
-> {
-  constructor(props: { children: ReactNode; fallback: ReactNode }) {
-    super(props);
-    this.state = { hasError: false };
-  }
-  static getDerivedStateFromError() { return { hasError: true }; }
-  render() {
-    return this.state.hasError ? this.props.fallback : this.props.children;
-  }
-}
-
-// ─── Outer component ──────────────────────────────────────────────────────────
+import React, { useRef, useEffect } from 'react';
 
 interface AvaParticleSceneProps {
   scrollProgress: number;
@@ -895,115 +15,110 @@ interface AvaParticleSceneProps {
 }
 
 export default function AvaParticleScene({
-  scrollProgress,
   className,
 }: AvaParticleSceneProps) {
-  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-  const count    = isMobile ? 14000 : 45000;
-
-  const [faceData, setFaceData] = useState<FaceData | null>(null);
-  const [loading,  setLoading]  = useState(true);
-
-  // ── Mouse-following background glow ──────────────────────────────────────
-  // A soft cyan radial gradient sits behind the particle cloud and smoothly
-  // follows the cursor — slower lerp than the particle rotation so it feels
-  // like a separate depth layer, giving the scene real perceived 3D volume.
-  const glowDivRef  = useRef<HTMLDivElement>(null);
-  const glowMouse   = useRef({ x: 50, y: 50, sx: 50, sy: 50 });
-  const glowRafRef  = useRef<number>(0);
+  const lightRef = useRef<HTMLDivElement>(null);
+  const rimRef   = useRef<HTMLDivElement>(null);
+  const mouse    = useRef({ x: 68, y: 42, sx: 68, sy: 42 });
+  const raf      = useRef<number>(0);
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
-      glowMouse.current.x = (e.clientX / window.innerWidth)  * 100;
-      glowMouse.current.y = (e.clientY / window.innerHeight) * 100;
+      mouse.current.x = (e.clientX / window.innerWidth)  * 100;
+      mouse.current.y = (e.clientY / window.innerHeight) * 100;
     };
     window.addEventListener('mousemove', onMove);
 
     const tick = () => {
-      const g = glowMouse.current;
-      g.sx += (g.x - g.sx) * 0.03;   // very slow follow — looks like depth-of-field shift
-      g.sy += (g.y - g.sy) * 0.03;
-      if (glowDivRef.current) {
-        glowDivRef.current.style.background =
-          `radial-gradient(ellipse 60% 70% at ${g.sx}% ${g.sy}%,` +
-          ` rgba(0,220,255,0.13) 0%, rgba(0,180,220,0.06) 38%, transparent 68%)`;
+      const m = mouse.current;
+      // Slow lerp — light drifts behind the cursor, feels atmospheric
+      m.sx += (m.x - m.sx) * 0.04;
+      m.sy += (m.y - m.sy) * 0.04;
+
+      if (lightRef.current) {
+        lightRef.current.style.background =
+          `radial-gradient(ellipse 52% 58% at ${m.sx}% ${m.sy}%,` +
+          ` rgba(0,210,255,0.30) 0%,` +
+          ` rgba(0,160,220,0.13) 38%,` +
+          ` rgba(0,80,160,0.05) 62%,` +
+          ` transparent 78%)`;
       }
-      glowRafRef.current = requestAnimationFrame(tick);
+
+      // Rim light: tighter bright spot offset toward face centre —
+      // creates edge contrast as the main light shifts away
+      if (rimRef.current) {
+        const rx = m.sx + (50 - m.sx) * 0.18;
+        const ry = m.sy + (45 - m.sy) * 0.18;
+        rimRef.current.style.background =
+          `radial-gradient(ellipse 26% 32% at ${rx}% ${ry}%,` +
+          ` rgba(0,230,255,0.20) 0%,` +
+          ` transparent 55%)`;
+      }
+
+      raf.current = requestAnimationFrame(tick);
     };
-    glowRafRef.current = requestAnimationFrame(tick);
+    raf.current = requestAnimationFrame(tick);
 
     return () => {
       window.removeEventListener('mousemove', onMove);
-      cancelAnimationFrame(glowRafRef.current);
+      cancelAnimationFrame(raf.current);
     };
   }, []);
 
-  useEffect(() => {
-    const canUseCanvas = typeof document !== 'undefined'
-      && typeof Blob !== 'undefined'
-      && typeof URL?.createObjectURL === 'function';
-
-    // Commit helper: set data + clear loading flag atomically
-    const commit = (data: FaceData) => { setFaceData(data); setLoading(false); };
-
-    if (!canUseCanvas) {
-      commit(makeFeminineGeometry(count));
-      return;
-    }
-
-    // Photo is always priority 1 — pixel sampling of ava-face.png concentrates
-    // particles at bright facial features (eyes, lips, brows, hair highlights).
-    // This is the approach that produces a recognisable human face.
-    loadPhotoFaceData(count).then((photoData) => {
-      if (photoData) { commit(photoData); return; }
-      // No photo file → fall through to embedded SVG, then procedural
-      sampleFromSVG(FACE_SVG, count)
-        .then(commit)
-        .catch(() => commit(makeFeminineGeometry(count)));
-    });
-  }, [count]);
-
-  if (!faceData) {
-    // Pulsing cyan loader — visible while GLB processes (~2-4 s)
-    return (
-      <div className={className} style={{
-        width: '100%', height: '100%',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        <div style={{
-          width: 88, height: 88, borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(0,220,255,0.18) 0%, transparent 70%)',
-          boxShadow: '0 0 48px rgba(0,220,255,0.30), 0 0 96px rgba(0,220,255,0.12)',
-          animation: 'pulse-glow 1.6s ease-in-out infinite',
-        }} />
-      </div>
-    );
-  }
-
   return (
-    <div className={className} style={{ width: '100%', height: '100%', position: 'relative' }}>
-      {/* Background glow — updated directly via ref, zero React re-renders */}
-      <div ref={glowDivRef} style={{
-        position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 0,
-        background: 'radial-gradient(ellipse 60% 70% at 50% 50%, rgba(0,220,255,0.13) 0%, rgba(0,180,220,0.06) 38%, transparent 68%)',
-      }} />
-      <div style={{ position: 'relative', zIndex: 1, width: '100%', height: '100%' }}>
-        <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
-          <Canvas
-            camera={{ position: [-0.3, 0.1, 4.5], fov: 52, near: 0.1, far: 100 }}
-            gl={{
-              alpha: true,
-              antialias: false,
-              powerPreference: 'high-performance',
-            }}
-            dpr={[1, 2]}
-            style={{ background: 'transparent' }}
-          >
-            <AdaptiveDpr pixelated />
-            <AvaParticles scrollProgress={scrollProgress} faceData={faceData} />
-          </Canvas>
-        </CanvasErrorBoundary>
-      </div>
+    <div
+      className={className}
+      style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}
+    >
+      {/* Main moving backlight */}
+      <div
+        ref={lightRef}
+        style={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 0,
+          pointerEvents: 'none',
+          background:
+            'radial-gradient(ellipse 52% 58% at 68% 42%, rgba(0,210,255,0.30) 0%, rgba(0,160,220,0.13) 38%, transparent 70%)',
+        }}
+      />
+
+      {/* Rim light — tighter highlight for face-edge contrast */}
+      <div
+        ref={rimRef}
+        style={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 0,
+          pointerEvents: 'none',
+          background:
+            'radial-gradient(ellipse 26% 32% at 62% 38%, rgba(0,230,255,0.20) 0%, transparent 55%)',
+        }}
+      />
+
+      {/* Ava photo — mix-blend-mode:screen makes the black bg disappear */}
+      <img
+        src="/ava-face.png"
+        alt="Ava"
+        style={{
+          position: 'absolute',
+          right: 0,
+          top: 0,
+          height: '100%',
+          width: '60%',
+          objectFit: 'contain',
+          objectPosition: 'center top',
+          zIndex: 1,
+          mixBlendMode: 'screen',
+          filter: [
+            'drop-shadow(0 0 24px rgba(0,210,255,0.55))',
+            'drop-shadow(0 0 60px rgba(0,170,220,0.28))',
+            'drop-shadow(0 0 110px rgba(0,100,180,0.14))',
+          ].join(' '),
+          pointerEvents: 'none',
+          userSelect: 'none',
+        }}
+      />
     </div>
   );
 }
