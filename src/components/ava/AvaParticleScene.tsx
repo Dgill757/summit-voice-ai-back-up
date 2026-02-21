@@ -598,12 +598,51 @@ function sampleGLTFMesh(gltf: any, count: number): FaceData {
   const centerY = p03Y + robustH * 0.40;
   const centerZ = (minZ + maxZ) / 2;
 
-  // ─ Step 3: Area-weighted CDF ────────────────────────────────────────────
-  const totalArea = areas.reduce((s, a) => s + a, 0);
-  const cdf = new Float32Array(areas.length);
+  // ─ Step 3: Auto-orient before filtering ────────────────────────────────
+  // Compute average normal Z across ALL triangles to detect if the model
+  // faces -Z (common for Meshy / Tripo exports). Flip BEFORE filtering so
+  // the front-face threshold is applied in the correct direction.
+  const triTotal = areas.length;
+  let rawAvgNZ = 0;
+  for (let ti = 0; ti < triTotal; ti++) {
+    const ns = ti * 9;
+    rawAvgNZ += (normStore[ns+2] + normStore[ns+5] + normStore[ns+8]) / 3;
+  }
+  rawAvgNZ /= triTotal;
+
+  if (rawAvgNZ < 0) {
+    // 180° rotation around Y: negate X and Z for positions + normals
+    for (let j = 0; j < posStore.length; j += 3) {
+      posStore[j]    = -posStore[j];
+      posStore[j+2]  = -posStore[j+2];
+      normStore[j]   = -normStore[j];
+      normStore[j+2] = -normStore[j+2];
+    }
+  }
+
+  // ─ Step 4: Front-face-only CDF ──────────────────────────────────────────
+  // Keep only triangles whose average normal faces the camera (nZ > 0.1).
+  // This drops the back of the skull, inner mouth, and wrapped side geometry
+  // that produced the formless scatter blob — leaving only the visible face.
+  const fwdAreas:   number[] = [];
+  const fwdIndices: number[] = [];  // original triangle index in posStore/normStore
+
+  for (let ti = 0; ti < triTotal; ti++) {
+    const ns = ti * 9;
+    const avgTriNZ = (normStore[ns+2] + normStore[ns+5] + normStore[ns+8]) / 3;
+    if (avgTriNZ > 0.1) {
+      fwdAreas.push(areas[ti]);
+      fwdIndices.push(ti);
+    }
+  }
+
+  if (fwdAreas.length === 0) return makeFeminineGeometry(count);
+
+  const totalArea = fwdAreas.reduce((s, a) => s + a, 0);
+  const cdf = new Float32Array(fwdAreas.length);
   let cumSum = 0;
-  for (let i = 0; i < areas.length; i++) {
-    cumSum += areas[i] / totalArea;
+  for (let i = 0; i < fwdAreas.length; i++) {
+    cumSum += fwdAreas[i] / totalArea;
     cdf[i]  = cumSum;
   }
 
@@ -611,7 +650,7 @@ function sampleGLTFMesh(gltf: any, count: number): FaceData {
     const r = rnd();
     let lo = 0, hi = cdf.length - 1;
     while (lo < hi) { const mid = (lo + hi) >> 1; if (cdf[mid] < r) lo = mid + 1; else hi = mid; }
-    return lo;
+    return fwdIndices[lo];  // return ORIGINAL triangle index into posStore/normStore
   }
 
   // ─ Step 4: Sample random surface points ────────────────────────────────
@@ -665,31 +704,22 @@ function sampleGLTFMesh(gltf: any, count: number): FaceData {
   centY /= count;
   for (let i = 0; i < count; i++) positions[i * 3 + 1] -= centY;
 
-  // ─ Step 6: Auto-orient — if model faces away from camera flip 180° around Y ─
-  // Meshy.ai / Tripo exports sometimes face -Z. We check the average sampled
-  // normal Z; if it's negative the face is turned away, so we rotate 180° (negate X and Z).
-  let avgNZ = 0;
-  for (let i = 0; i < count; i++) avgNZ += normals[i * 3 + 2];
-  avgNZ /= count;
-  if (avgNZ < -0.1) {
-    for (let i = 0; i < count; i++) {
-      positions[i * 3]     = -positions[i * 3];      // negate X
-      positions[i * 3 + 2] = -positions[i * 3 + 2];  // negate Z  →  180° Y rotation
-      normals[i * 3]       = -normals[i * 3];
-      normals[i * 3 + 2]   = -normals[i * 3 + 2];
-    }
-  }
-
   return { positions, normals, randoms, colors, sizes, delays };
 }
 
-function loadGLTFFaceData(_count: number): Promise<FaceData | null> {
-  // Uniform mesh sampling spreads particles across ALL surfaces (back of head,
-  // inner mouth, scattered hair) — producing a formless blob, not a face.
-  // Photo/SVG pixel sampling wins here: bright pixels → dense particles at
-  // the exact features that make a face readable. Disabled until a
-  // front-face-only depth-map hybrid sampler is ready.
-  return Promise.resolve(null);
+function loadGLTFFaceData(count: number): Promise<FaceData | null> {
+  return new Promise((resolve) => {
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+    const loader = new GLTFLoader();
+    loader.setDRACOLoader(dracoLoader);
+    loader.load(
+      '/ava-model.glb?' + Math.floor(Date.now() / 60000),
+      (gltf) => { try { resolve(sampleGLTFMesh(gltf, count)); } catch { resolve(null); } },
+      undefined,
+      () => resolve(null),  // file not present — fall through to photo/SVG
+    );
+  });
 }
 
 // ─── Inner R3F particles component ───────────────────────────────────────────
