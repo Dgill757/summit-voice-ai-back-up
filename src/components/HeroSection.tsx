@@ -43,14 +43,15 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
         justifyContent: 'center',
       }}
     >
-      {/* Ambient glow behind Ava — sits under particles, gives scene a light-source feeling */}
+      {/* Ambient glow behind Ava — stronger, repositioned to right-center where Ava sits */}
       <div style={{
         position: 'absolute',
         inset: 0,
         zIndex: 0,
         background: [
-          'radial-gradient(ellipse 38% 55% at 68% 46%, rgba(0,220,255,0.07) 0%, transparent 70%)',
-          'radial-gradient(ellipse 22% 32% at 66% 44%, rgba(0,200,255,0.05) 0%, transparent 60%)',
+          'radial-gradient(ellipse 45% 65% at 68% 48%, rgba(0,220,255,0.10) 0%, transparent 70%)',
+          'radial-gradient(ellipse 26% 38% at 66% 45%, rgba(0,180,255,0.07) 0%, transparent 55%)',
+          'radial-gradient(ellipse 20% 30% at 70% 52%, rgba(0,220,255,0.05) 0%, transparent 60%)',
         ].join(', '),
         pointerEvents: 'none',
       }} />
@@ -69,6 +70,15 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
           className="w-full h-full"
         />
       </div>
+
+      {/* Text protection gradient — dark-left fade so particles don't bleed into copy */}
+      <div style={{
+        position: 'absolute',
+        inset: 0,
+        zIndex: 1,
+        background: 'linear-gradient(to right, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0.50) 28%, rgba(0,0,0,0.14) 52%, transparent 68%)',
+        pointerEvents: 'none',
+      }} />
 
       {/* ── Hero Content ── */}
       <div style={{
@@ -94,16 +104,16 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
             display: 'inline-flex',
             alignItems: 'center',
             gap: '0.6rem',
-            background: 'rgba(124,58,237,0.12)',
-            border: '1px solid rgba(124,58,237,0.28)',
+            background: 'rgba(0,200,220,0.10)',
+            border: '1px solid rgba(0,200,220,0.30)',
             borderRadius: 999,
             padding: '0.45rem 1.1rem',
             marginBottom: '2rem',
           }}>
             <span style={{
               width: 8, height: 8, borderRadius: '50%',
-              background: '#7C3AED',
-              boxShadow: '0 0 12px rgba(124,58,237,0.9)',
+              background: '#00D4E0',
+              boxShadow: '0 0 12px rgba(0,212,224,0.95)',
               animation: 'pulse-glow 2.5s ease-in-out infinite',
               display: 'inline-block',
             }} />
@@ -123,7 +133,7 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
           }}>
             Meet{' '}
             <span style={{
-              background: 'linear-gradient(135deg, #7C3AED 0%, #3B82F6 50%, #F472B6 100%)',
+              background: 'linear-gradient(135deg, #00DCDC 0%, #00A8FF 55%, #7C3AED 100%)',
               WebkitBackgroundClip: 'text',
               WebkitTextFillColor: 'transparent',
               backgroundClip: 'text',
@@ -191,7 +201,7 @@ const HeroSection: React.FC<HeroSectionProps> = ({ calendarOpen, setCalendarOpen
                 color: 'rgba(255,255,255,0.75)',
                 fontWeight: 500,
               }}>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7C3AED" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#00D4E0" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="20 6 9 17 4 12"/>
                 </svg>
                 {feat}

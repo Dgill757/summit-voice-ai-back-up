@@ -643,6 +643,21 @@ function sampleGLTFMesh(gltf: any, count: number): FaceData {
     delays[i] = rnd() * Math.PI * 2;
   }
 
+  // ─ Step 5: Auto-orient — if model faces away from camera flip 180° around Y ─
+  // Meshy.ai / Tripo exports sometimes face -Z. We check the average sampled
+  // normal Z; if it's negative the face is turned away, so we rotate 180° (negate X and Z).
+  let avgNZ = 0;
+  for (let i = 0; i < count; i++) avgNZ += normals[i * 3 + 2];
+  avgNZ /= count;
+  if (avgNZ < -0.1) {
+    for (let i = 0; i < count; i++) {
+      positions[i * 3]     = -positions[i * 3];      // negate X
+      positions[i * 3 + 2] = -positions[i * 3 + 2];  // negate Z  →  180° Y rotation
+      normals[i * 3]       = -normals[i * 3];
+      normals[i * 3 + 2]   = -normals[i * 3 + 2];
+    }
+  }
+
   return { positions, normals, randoms, colors, sizes, delays };
 }
 
@@ -774,17 +789,21 @@ export default function AvaParticleScene({
   className,
 }: AvaParticleSceneProps) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-  const count    = isMobile ? 12000 : 35000;
+  const count    = isMobile ? 14000 : 45000;
 
   const [faceData, setFaceData] = useState<FaceData | null>(null);
+  const [loading,  setLoading]  = useState(true);
 
   useEffect(() => {
     const canUseCanvas = typeof document !== 'undefined'
       && typeof Blob !== 'undefined'
       && typeof URL?.createObjectURL === 'function';
 
+    // Commit helper: set data + clear loading flag atomically
+    const commit = (data: FaceData) => { setFaceData(data); setLoading(false); };
+
     if (!canUseCanvas) {
-      setFaceData(makeFeminineGeometry(count));
+      commit(makeFeminineGeometry(count));
       return;
     }
 
@@ -793,29 +812,42 @@ export default function AvaParticleScene({
     // Priority 3: embedded SVG face     — no external files needed
     // Priority 4: procedural geometry   — SSR / old browser fallback
     loadGLTFFaceData(count).then((glbData) => {
-      if (glbData) { setFaceData(glbData); return; }
+      if (glbData) { commit(glbData); return; }
 
       loadPhotoFaceData(count).then((photoData) => {
         if (photoData) {
-          setFaceData(photoData);
+          commit(photoData);
         } else {
           sampleFromSVG(FACE_SVG, count)
-            .then(setFaceData)
-            .catch(() => setFaceData(makeFeminineGeometry(count)));
+            .then(commit)
+            .catch(() => commit(makeFeminineGeometry(count)));
         }
       });
     });
   }, [count]);
 
   if (!faceData) {
-    return <div className={className} style={{ width: '100%', height: '100%' }} />;
+    // Pulsing cyan loader — visible while GLB processes (~2-4 s)
+    return (
+      <div className={className} style={{
+        width: '100%', height: '100%',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <div style={{
+          width: 88, height: 88, borderRadius: '50%',
+          background: 'radial-gradient(circle, rgba(0,220,255,0.18) 0%, transparent 70%)',
+          boxShadow: '0 0 48px rgba(0,220,255,0.30), 0 0 96px rgba(0,220,255,0.12)',
+          animation: 'pulse-glow 1.6s ease-in-out infinite',
+        }} />
+      </div>
+    );
   }
 
   return (
     <div className={className} style={{ width: '100%', height: '100%' }}>
       <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
         <Canvas
-          camera={{ position: [0, 0, 4.5], fov: 52, near: 0.1, far: 100 }}
+          camera={{ position: [-0.3, 0.1, 4.5], fov: 52, near: 0.1, far: 100 }}
           gl={{
             alpha: true,
             antialias: false,
