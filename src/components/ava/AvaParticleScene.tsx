@@ -262,15 +262,18 @@ function sampleImageDataToFaceData(
 ): FaceData {
   const data = imageData.data;
 
-  type Pixel = { px: number; py: number; b: number };
+  type Pixel = { px: number; py: number; b: number; pr: number; pg: number; pb: number };
   const pool: Pixel[] = [];
   for (let i = 0; i < data.length; i += 4) {
-    const b = (data[i] + data[i+1] + data[i+2]) / (3 * 255);
+    const pr = data[i]   / 255;
+    const pg = data[i+1] / 255;
+    const pb = data[i+2] / 255;
+    const b  = (pr + pg + pb) / 3;
     if (b < 0.06) continue;                  // skip near-black (background)
     const px = (i / 4) % srcW;
     const py = Math.floor((i / 4) / srcW);
     const weight = Math.ceil(b * 4);         // repeat 1-4× — biases toward bright features
-    for (let w = 0; w < weight; w++) pool.push({ px, py, b });
+    for (let w = 0; w < weight; w++) pool.push({ px, py, b, pr, pg, pb });
   }
 
   const positions = new Float32Array(count * 3);
@@ -281,7 +284,7 @@ function sampleImageDataToFaceData(
   const delays    = new Float32Array(count);
 
   for (let i = 0; i < count; i++) {
-    const { px, py, b } = pool[Math.floor(rnd() * pool.length)];
+    const { px, py, b, pr, pg, pb } = pool[Math.floor(rnd() * pool.length)];
     const jx = rng(-0.8, 0.8);
     const jy = rng(-0.8, 0.8);
     // Map pixel → Three.js world: x[-1.5,1.5], y[+2,-2] (flip Y)
@@ -315,8 +318,13 @@ function sampleImageDataToFaceData(
     const nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
     normals[i*3] = nx/nl; normals[i*3+1] = ny/nl; normals[i*3+2] = nz/nl;
     randoms[i] = rnd();
-    const [r, g, gc] = particleColor(b * rng(0.60, 1.00));
-    colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
+    // Use actual photo colors — skin tones, golden hair, lip color — so
+    // particles look like a real woman rather than a synthetic hologram.
+    // Boost brightness so particles stay vivid at small point sizes.
+    const boost = rng(1.2, 1.8);
+    colors[i*3]   = Math.min(1, pr * boost);
+    colors[i*3+1] = Math.min(1, pg * boost);
+    colors[i*3+2] = Math.min(1, pb * boost);
     sizes[i]  = rng(0.04, 0.09) + b * rng(0.00, 0.06);
     delays[i] = rnd() * Math.PI * 2;
   }
@@ -852,16 +860,17 @@ export default function AvaParticleScene({
       return;
     }
 
-    // Priority 1: /public/ava-model.glb — real 3D mesh (best, particles on actual surface)
-    // Priority 2: /public/ava-face.png  — 2D photo pixel sampling
+    // Priority 1: /public/ava-face.png  — photo pixel sampling: particles concentrate
+    //             at bright facial features (eyes, lips, brows) → looks human
+    // Priority 2: /public/ava-model.glb — front-face 3D mesh sampling (fallback)
     // Priority 3: embedded SVG face     — no external files needed
     // Priority 4: procedural geometry   — SSR / old browser fallback
-    loadGLTFFaceData(count).then((glbData) => {
-      if (glbData) { commit(glbData); return; }
+    loadPhotoFaceData(count).then((photoData) => {
+      if (photoData) { commit(photoData); return; }
 
-      loadPhotoFaceData(count).then((photoData) => {
-        if (photoData) {
-          commit(photoData);
+      loadGLTFFaceData(count).then((glbData) => {
+        if (glbData) {
+          commit(glbData);
         } else {
           sampleFromSVG(FACE_SVG, count)
             .then(commit)
