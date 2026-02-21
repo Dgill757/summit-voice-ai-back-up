@@ -592,7 +592,7 @@ function sampleGLTFMesh(gltf: any, count: number): FaceData {
   const p97Y = triCenterYs[Math.min(n - 1, Math.floor(n * 0.97))];
   const robustH = p97Y - p03Y;
 
-  const scale   = robustH > 0.001 ? 4.0 / robustH : (maxY - minY) > 0 ? 4.0 / (maxY - minY) : 1.0;
+  const scale   = robustH > 0.001 ? 2.8 / robustH : (maxY - minY) > 0 ? 2.8 / (maxY - minY) : 1.0;
   const centerX = (minX + maxX) / 2;
   // Anchor at 40% up from p03 — puts the face/eye region near Y=0 after scaling
   const centerY = p03Y + robustH * 0.40;
@@ -869,7 +869,7 @@ export default function AvaParticleScene({
     <div className={className} style={{ width: '100%', height: '100%' }}>
       <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
         <Canvas
-          camera={{ position: [-0.3, 0.4, 3.5], fov: 55, near: 0.1, far: 100 }}
+          camera={{ position: [-0.3, 0.3, 5.5], fov: 50, near: 0.1, far: 100 }}
           gl={{
             alpha: true,
             antialias: false,
