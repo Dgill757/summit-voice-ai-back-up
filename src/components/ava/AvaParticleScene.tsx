@@ -262,18 +262,15 @@ function sampleImageDataToFaceData(
 ): FaceData {
   const data = imageData.data;
 
-  type Pixel = { px: number; py: number; b: number; pr: number; pg: number; pb: number };
+  type Pixel = { px: number; py: number; b: number };
   const pool: Pixel[] = [];
   for (let i = 0; i < data.length; i += 4) {
-    const pr = data[i]   / 255;
-    const pg = data[i+1] / 255;
-    const pb = data[i+2] / 255;
-    const b  = (pr + pg + pb) / 3;
+    const b = (data[i] + data[i+1] + data[i+2]) / (3 * 255);
     if (b < 0.06) continue;                  // skip near-black (background)
     const px = (i / 4) % srcW;
     const py = Math.floor((i / 4) / srcW);
     const weight = Math.ceil(b * 4);         // repeat 1-4× — biases toward bright features
-    for (let w = 0; w < weight; w++) pool.push({ px, py, b, pr, pg, pb });
+    for (let w = 0; w < weight; w++) pool.push({ px, py, b });
   }
 
   const positions = new Float32Array(count * 3);
@@ -284,7 +281,7 @@ function sampleImageDataToFaceData(
   const delays    = new Float32Array(count);
 
   for (let i = 0; i < count; i++) {
-    const { px, py, b, pr, pg, pb } = pool[Math.floor(rnd() * pool.length)];
+    const { px, py, b } = pool[Math.floor(rnd() * pool.length)];
     const jx = rng(-0.8, 0.8);
     const jy = rng(-0.8, 0.8);
     // Map pixel → Three.js world: x[-1.5,1.5], y[+2,-2] (flip Y)
@@ -318,17 +315,68 @@ function sampleImageDataToFaceData(
     const nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
     normals[i*3] = nx/nl; normals[i*3+1] = ny/nl; normals[i*3+2] = nz/nl;
     randoms[i] = rnd();
-    // Use actual photo colors — skin tones, golden hair, lip color — so
-    // particles look like a real woman rather than a synthetic hologram.
-    // Boost brightness so particles stay vivid at small point sizes.
-    const boost = rng(1.2, 1.8);
-    colors[i*3]   = Math.min(1, pr * boost);
-    colors[i*3+1] = Math.min(1, pg * boost);
-    colors[i*3+2] = Math.min(1, pb * boost);
+    const [r, g, gc] = particleColor(b * rng(0.60, 1.00));
+    colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
     sizes[i]  = rng(0.04, 0.09) + b * rng(0.00, 0.06);
     delays[i] = rnd() * Math.PI * 2;
   }
   return { positions, normals, randoms, colors, sizes, delays };
+}
+
+// ─── GLB Z-depth hybrid helpers ───────────────────────────────────────────────
+//
+// The $10 Ava model gives us real 3D depth from the actual skull/face geometry.
+// Rather than using it for particle *placement* (which scatters particles over
+// the whole mesh), we use it as a Z-depth lookup table: photo pixels place the
+// particles where they look right (face features), and the GLB provides the
+// exact Z coordinate for each position from the real 3D surface.
+
+const GLB_GRID_W = 80;
+const GLB_GRID_H = 100;
+
+// Build a 2D grid mapping (X,Y) world-space coords → Z from the GLB front face.
+function buildGLBZGrid(glbData: FaceData): Float32Array {
+  const count = glbData.positions.length / 3;
+  const gridSum   = new Float32Array(GLB_GRID_W * GLB_GRID_H);
+  const gridCount = new Int32Array(GLB_GRID_W * GLB_GRID_H);
+
+  for (let i = 0; i < count; i++) {
+    const x = glbData.positions[i * 3];
+    const y = glbData.positions[i * 3 + 1];
+    const z = glbData.positions[i * 3 + 2];
+    // Map world X[-1.5,1.5] → [0,gridW],  Y[-2,2] → [0,gridH] (Y is +up in world)
+    const gx = Math.floor((x / 3.0 + 0.5) * GLB_GRID_W);
+    const gy = Math.floor((-y / 4.0 + 0.5) * GLB_GRID_H);
+    if (gx < 0 || gx >= GLB_GRID_W || gy < 0 || gy >= GLB_GRID_H) continue;
+    const gi = gy * GLB_GRID_W + gx;
+    gridSum[gi]   += z;
+    gridCount[gi] += 1;
+  }
+
+  const grid = new Float32Array(GLB_GRID_W * GLB_GRID_H).fill(NaN);
+  for (let i = 0; i < GLB_GRID_W * GLB_GRID_H; i++) {
+    if (gridCount[i] > 0) grid[i] = gridSum[i] / gridCount[i];
+  }
+  return grid;
+}
+
+// Replace the anatomical Z values in photoData with real GLB Z values.
+// Cells with no GLB coverage keep the anatomical fallback.
+function applyGLBDepth(photoData: FaceData, glbData: FaceData): FaceData {
+  const grid    = buildGLBZGrid(glbData);
+  const count   = photoData.positions.length / 3;
+  const positions = new Float32Array(photoData.positions);  // copy so we don't mutate
+
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 3];
+    const y = positions[i * 3 + 1];
+    const gx = Math.max(0, Math.min(GLB_GRID_W - 1, Math.floor((x / 3.0 + 0.5) * GLB_GRID_W)));
+    const gy = Math.max(0, Math.min(GLB_GRID_H - 1, Math.floor((-y / 4.0 + 0.5) * GLB_GRID_H)));
+    const z  = grid[gy * GLB_GRID_W + gx];
+    if (!isNaN(z)) positions[i * 3 + 2] = z;
+    // else: keep the anatomical Z assigned by sampleImageDataToFaceData
+  }
+  return { ...photoData, positions };
 }
 
 // ─── Photo loader — /public/ava-face.png (optional, best quality) ────────────
@@ -847,6 +895,40 @@ export default function AvaParticleScene({
   const [faceData, setFaceData] = useState<FaceData | null>(null);
   const [loading,  setLoading]  = useState(true);
 
+  // ── Mouse-following background glow ──────────────────────────────────────
+  // A soft cyan radial gradient sits behind the particle cloud and smoothly
+  // follows the cursor — slower lerp than the particle rotation so it feels
+  // like a separate depth layer, giving the scene real perceived 3D volume.
+  const glowDivRef  = useRef<HTMLDivElement>(null);
+  const glowMouse   = useRef({ x: 50, y: 50, sx: 50, sy: 50 });
+  const glowRafRef  = useRef<number>(0);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      glowMouse.current.x = (e.clientX / window.innerWidth)  * 100;
+      glowMouse.current.y = (e.clientY / window.innerHeight) * 100;
+    };
+    window.addEventListener('mousemove', onMove);
+
+    const tick = () => {
+      const g = glowMouse.current;
+      g.sx += (g.x - g.sx) * 0.03;   // very slow follow — looks like depth-of-field shift
+      g.sy += (g.y - g.sy) * 0.03;
+      if (glowDivRef.current) {
+        glowDivRef.current.style.background =
+          `radial-gradient(ellipse 60% 70% at ${g.sx}% ${g.sy}%,` +
+          ` rgba(0,220,255,0.13) 0%, rgba(0,180,220,0.06) 38%, transparent 68%)`;
+      }
+      glowRafRef.current = requestAnimationFrame(tick);
+    };
+    glowRafRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      cancelAnimationFrame(glowRafRef.current);
+    };
+  }, []);
+
   useEffect(() => {
     const canUseCanvas = typeof document !== 'undefined'
       && typeof Blob !== 'undefined'
@@ -860,23 +942,27 @@ export default function AvaParticleScene({
       return;
     }
 
-    // Priority 1: /public/ava-face.png  — photo pixel sampling: particles concentrate
-    //             at bright facial features (eyes, lips, brows) → looks human
-    // Priority 2: /public/ava-model.glb — front-face 3D mesh sampling (fallback)
-    // Priority 3: embedded SVG face     — no external files needed
-    // Priority 4: procedural geometry   — SSR / old browser fallback
-    loadPhotoFaceData(count).then((photoData) => {
-      if (photoData) { commit(photoData); return; }
-
-      loadGLTFFaceData(count).then((glbData) => {
-        if (glbData) {
-          commit(glbData);
-        } else {
-          sampleFromSVG(FACE_SVG, count)
-            .then(commit)
-            .catch(() => commit(makeFeminineGeometry(count)));
-        }
-      });
+    // Load photo + GLB in parallel:
+    //   Photo → particle XY placement (bright pixels = face features)
+    //   GLB   → real Z depth from actual 3D skull geometry ($10 model)
+    // When both succeed, GLB Z values overwrite the anatomical Z fallback
+    // so depth is real mesh geometry, not hand-coded bands.
+    Promise.all([loadPhotoFaceData(count), loadGLTFFaceData(count)]).then(([photoData, glbData]) => {
+      if (photoData && glbData) {
+        // Best case: photo shape + real 3D depth from Ava model
+        commit(applyGLBDepth(photoData, glbData));
+      } else if (photoData) {
+        // Photo only — anatomical Z-depth (still looks good)
+        commit(photoData);
+      } else if (glbData) {
+        // GLB only (photo missing) — front-face mesh particles
+        commit(glbData);
+      } else {
+        // No external files — SVG → procedural fallback
+        sampleFromSVG(FACE_SVG, count)
+          .then(commit)
+          .catch(() => commit(makeFeminineGeometry(count)));
+      }
     });
   }, [count]);
 
@@ -898,22 +984,29 @@ export default function AvaParticleScene({
   }
 
   return (
-    <div className={className} style={{ width: '100%', height: '100%' }}>
-      <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
-        <Canvas
-          camera={{ position: [-0.3, 0.1, 4.5], fov: 52, near: 0.1, far: 100 }}
-          gl={{
-            alpha: true,
-            antialias: false,
-            powerPreference: 'high-performance',
-          }}
-          dpr={[1, 2]}
-          style={{ background: 'transparent' }}
-        >
-          <AdaptiveDpr pixelated />
-          <AvaParticles scrollProgress={scrollProgress} faceData={faceData} />
-        </Canvas>
-      </CanvasErrorBoundary>
+    <div className={className} style={{ width: '100%', height: '100%', position: 'relative' }}>
+      {/* Background glow — updated directly via ref, zero React re-renders */}
+      <div ref={glowDivRef} style={{
+        position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 0,
+        background: 'radial-gradient(ellipse 60% 70% at 50% 50%, rgba(0,220,255,0.13) 0%, rgba(0,180,220,0.06) 38%, transparent 68%)',
+      }} />
+      <div style={{ position: 'relative', zIndex: 1, width: '100%', height: '100%' }}>
+        <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
+          <Canvas
+            camera={{ position: [-0.3, 0.1, 4.5], fov: 52, near: 0.1, far: 100 }}
+            gl={{
+              alpha: true,
+              antialias: false,
+              powerPreference: 'high-performance',
+            }}
+            dpr={[1, 2]}
+            style={{ background: 'transparent' }}
+          >
+            <AdaptiveDpr pixelated />
+            <AvaParticles scrollProgress={scrollProgress} faceData={faceData} />
+          </Canvas>
+        </CanvasErrorBoundary>
+      </div>
     </div>
   );
 }
