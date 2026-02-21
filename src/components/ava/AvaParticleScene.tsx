@@ -577,11 +577,25 @@ function sampleGLTFMesh(gltf: any, count: number): FaceData {
 
   if (areas.length === 0) return makeFeminineGeometry(count);
 
-  // ─ Step 2: Normalize to world space ────────────────────────────────────
-  // Scale so full model height = 4.0 units. Center at origin.
-  const scale   = (maxY - minY) > 0 ? 4.0 / (maxY - minY) : 1.0;
+  // ─ Step 2: Robust normalization via percentile Y range ─────────────────
+  // Using raw min/max fails if the model has outlier verts (stray hair strands,
+  // background planes, etc.) that expand the bbox and shrink the scale.
+  // Instead we use the 3rd–97th percentile of triangle-center Y values to
+  // compute a scale that represents where 94% of the geometry actually lives.
+  const triCenterYs: number[] = [];
+  for (let i = 0; i < posStore.length; i += 9) {
+    triCenterYs.push((posStore[i + 1] + posStore[i + 4] + posStore[i + 7]) / 3);
+  }
+  triCenterYs.sort((a, b) => a - b);
+  const n = triCenterYs.length;
+  const p03Y = triCenterYs[Math.max(0, Math.floor(n * 0.03))];
+  const p97Y = triCenterYs[Math.min(n - 1, Math.floor(n * 0.97))];
+  const robustH = p97Y - p03Y;
+
+  const scale   = robustH > 0.001 ? 4.0 / robustH : (maxY - minY) > 0 ? 4.0 / (maxY - minY) : 1.0;
   const centerX = (minX + maxX) / 2;
-  const centerY = (minY + maxY) / 2;
+  // Anchor at 40% up from p03 — puts the face/eye region near Y=0 after scaling
+  const centerY = p03Y + robustH * 0.40;
   const centerZ = (minZ + maxZ) / 2;
 
   // ─ Step 3: Area-weighted CDF ────────────────────────────────────────────
@@ -639,11 +653,19 @@ function sampleGLTFMesh(gltf: any, count: number): FaceData {
     const [r, g, gc] = particleColor(facing * rng(0.65, 1.0));
     colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = gc;
 
-    sizes[i]  = rng(0.022, 0.050) + facing * rng(0.008, 0.022);
+    sizes[i]  = rng(0.035, 0.075) + facing * rng(0.014, 0.032);
     delays[i] = rnd() * Math.PI * 2;
   }
 
-  // ─ Step 5: Auto-orient — if model faces away from camera flip 180° around Y ─
+  // ─ Step 5: Centroid re-center (safety net) ─────────────────────────────
+  // Even with percentile scaling the sampled centroid may drift. Shift so
+  // the average sampled Y = 0, keeping the face in the camera's view.
+  let centY = 0;
+  for (let i = 0; i < count; i++) centY += positions[i * 3 + 1];
+  centY /= count;
+  for (let i = 0; i < count; i++) positions[i * 3 + 1] -= centY;
+
+  // ─ Step 6: Auto-orient — if model faces away from camera flip 180° around Y ─
   // Meshy.ai / Tripo exports sometimes face -Z. We check the average sampled
   // normal Z; if it's negative the face is turned away, so we rotate 180° (negate X and Z).
   let avgNZ = 0;
@@ -847,7 +869,7 @@ export default function AvaParticleScene({
     <div className={className} style={{ width: '100%', height: '100%' }}>
       <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
         <Canvas
-          camera={{ position: [-0.3, 0.1, 4.5], fov: 52, near: 0.1, far: 100 }}
+          camera={{ position: [-0.3, 0.4, 3.5], fov: 55, near: 0.1, far: 100 }}
           gl={{
             alpha: true,
             antialias: false,
