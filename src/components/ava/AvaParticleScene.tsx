@@ -942,27 +942,15 @@ export default function AvaParticleScene({
       return;
     }
 
-    // Load photo + GLB in parallel:
-    //   Photo → particle XY placement (bright pixels = face features)
-    //   GLB   → real Z depth from actual 3D skull geometry ($10 model)
-    // When both succeed, GLB Z values overwrite the anatomical Z fallback
-    // so depth is real mesh geometry, not hand-coded bands.
-    Promise.all([loadPhotoFaceData(count), loadGLTFFaceData(count)]).then(([photoData, glbData]) => {
-      if (photoData && glbData) {
-        // Best case: photo shape + real 3D depth from Ava model
-        commit(applyGLBDepth(photoData, glbData));
-      } else if (photoData) {
-        // Photo only — anatomical Z-depth (still looks good)
-        commit(photoData);
-      } else if (glbData) {
-        // GLB only (photo missing) — front-face mesh particles
-        commit(glbData);
-      } else {
-        // No external files — SVG → procedural fallback
-        sampleFromSVG(FACE_SVG, count)
-          .then(commit)
-          .catch(() => commit(makeFeminineGeometry(count)));
-      }
+    // Photo is always priority 1 — pixel sampling of ava-face.png concentrates
+    // particles at bright facial features (eyes, lips, brows, hair highlights).
+    // This is the approach that produces a recognisable human face.
+    loadPhotoFaceData(count).then((photoData) => {
+      if (photoData) { commit(photoData); return; }
+      // No photo file → fall through to embedded SVG, then procedural
+      sampleFromSVG(FACE_SVG, count)
+        .then(commit)
+        .catch(() => commit(makeFeminineGeometry(count)));
     });
   }, [count]);
 
