@@ -683,20 +683,13 @@ function sampleGLTFMesh(gltf: any, count: number): FaceData {
   return { positions, normals, randoms, colors, sizes, delays };
 }
 
-function loadGLTFFaceData(count: number): Promise<FaceData | null> {
-  return new Promise((resolve) => {
-    const dracoLoader = new DRACOLoader();
-    // Google-hosted decoder supports files compressed by gltfpack / gltf.report
-    dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
-    const loader = new GLTFLoader();
-    loader.setDRACOLoader(dracoLoader);
-    loader.load(
-      '/ava-model.glb?' + Math.floor(Date.now() / 60000),
-      (gltf) => { try { resolve(sampleGLTFMesh(gltf, count)); } catch { resolve(null); } },
-      undefined,
-      () => resolve(null),  // file not present — fall through to photo/SVG chain
-    );
-  });
+function loadGLTFFaceData(_count: number): Promise<FaceData | null> {
+  // Uniform mesh sampling spreads particles across ALL surfaces (back of head,
+  // inner mouth, scattered hair) — producing a formless blob, not a face.
+  // Photo/SVG pixel sampling wins here: bright pixels → dense particles at
+  // the exact features that make a face readable. Disabled until a
+  // front-face-only depth-map hybrid sampler is ready.
+  return Promise.resolve(null);
 }
 
 // ─── Inner R3F particles component ───────────────────────────────────────────
@@ -869,7 +862,7 @@ export default function AvaParticleScene({
     <div className={className} style={{ width: '100%', height: '100%' }}>
       <CanvasErrorBoundary fallback={<div style={{ width: '100%', height: '100%' }} />}>
         <Canvas
-          camera={{ position: [-0.3, 0.3, 5.5], fov: 50, near: 0.1, far: 100 }}
+          camera={{ position: [-0.3, 0.1, 4.5], fov: 52, near: 0.1, far: 100 }}
           gl={{
             alpha: true,
             antialias: false,
